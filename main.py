@@ -5,7 +5,7 @@ import pyzipper
 from telegram import Update, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # از محیط Render ست کن
+BOT_TOKEN = os.getenv("8133176558:AAE4uj57yovjfDJMg-aDdhRaovjFdMGJCWw")  # از محیط Render ست کن
 
 HELP_TEXT = """
 سلام 👋
