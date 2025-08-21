@@ -5,7 +5,13 @@ import pyzipper
 from telegram import Update, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # از محیط Render ست کن
+# خواندن توکن از محیط
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError("❌ BOT_TOKEN تعریف نشده! لطفاً در Render → Environment Variables اضافه کن.")
+
+# محدودیت حجم فایل برای Free Render
+MAX_FILE_SIZE = 512 * 1024 * 1024  # 512 MB
 
 HELP_TEXT = """
 سلام 👋
@@ -28,11 +34,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
+    doc = msg.document
+
+    # بررسی حجم فایل قبل از دانلود
+    if doc.file_size > MAX_FILE_SIZE:
+        await msg.reply_text("❌ حجم فایل بیش از 512MB است و نمی‌توانم پردازش کنم.")
+        return
+
     pwd = parse_password(msg.caption)
     if not pwd:
         return await msg.reply_text("❌ رمز پیدا نشد. در کپشن بنویس: /zip pass=1234")
 
-    doc = msg.document
     await msg.reply_text("⬇️ دارم دانلود می‌کنم...")
 
     with tempfile.TemporaryDirectory() as td:
