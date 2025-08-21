@@ -1,16 +1,13 @@
 import os
 import tempfile
-import asyncio
 import pyzipper
 from telegram import Update, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
-# خواندن توکن از محیط
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("❌ BOT_TOKEN تعریف نشده! لطفاً در Render → Environment Variables اضافه کن.")
 
-# محدودیت حجم فایل برای Free Render
 MAX_FILE_SIZE = 512 * 1024 * 1024  # 512 MB
 
 HELP_TEXT = """
@@ -36,7 +33,6 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     doc = msg.document
 
-    # بررسی حجم فایل قبل از دانلود
     if doc.file_size > MAX_FILE_SIZE:
         await msg.reply_text("❌ حجم فایل بیش از 512MB است و نمی‌توانم پردازش کنم.")
         return
@@ -54,7 +50,6 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = await context.bot.get_file(doc.file_id)
         await file.download_to_drive(custom_path=orig_path)
 
-        # ساخت زیپ رمزدار
         with pyzipper.AESZipFile(zip_path, 'w',
                                  compression=pyzipper.ZIP_DEFLATED,
                                  encryption=pyzipper.WZ_AES) as zf:
@@ -70,11 +65,12 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             caption="📦 زیپ رمزدار آماده شد."
         )
 
-async def main():
+def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
-    await app.run_polling()
+    # 🔹 به جای asyncio.run()
+    app.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
