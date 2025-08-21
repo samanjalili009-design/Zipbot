@@ -13,11 +13,9 @@ MAX_FILE_SIZE = 512 * 1024 * 1024  # 512 MB
 
 HELP_TEXT = """
 سلام 👋
-📌 فایل رو نفرست، بلکه لینک مستقیمش را بده و در پیام بنویس:
-   pass=رمزتو
+📌 لینک مستقیم فایل و رمز را بده.
 مثال:
-   pass=1234
-   https://example.com/file.zip
+pass=1234 https://example.com/file.zip
 """
 
 def parse_password(text: str | None) -> str | None:
@@ -89,7 +87,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
-    app.run_polling()
+    app.run_polling()  # بدون asyncio.run()
 
 if __name__ == "__main__":
     main()
