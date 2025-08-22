@@ -1,5 +1,5 @@
 pyrogram==2.0.106
 tgcrypto==1.2.5
 pyzipper==0.3.6
-aiohttp==3.8.5
+aiohttp==3.8.4
 aiofiles==23.1.0
