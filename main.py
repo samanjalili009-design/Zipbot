@@ -1,185 +1,93 @@
 import os
-import io
-import requests
+import tempfile
+import aiohttp
 import pyzipper
-import logging
-from telegram import Update
+from telegram import Update, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
-
-# تنظیمات logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise RuntimeError("❌ BOT_TOKEN not found! Set it in Render Environment Variables")
+    raise RuntimeError("❌ BOT_TOKEN تعریف نشده! لطفاً در Render → Environment Variables اضافه کن.")
 
-MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB برای اطمینان
+MAX_FILE_SIZE = 512 * 1024 * 1024  # 512 MB
 
 HELP_TEXT = """
-🔐 **File Zipper Bot**
-📦 فایل‌ها را زیپ کرده و رمزگذاری می‌کند
-
-📌 **نحوه استفاده:**
-pass=رمز_خود https://example.com/file.ext
-
-🎯 **مثال:**
-`pass=1234 https://site.com/document.pdf`
-
-⚠️ **توجه:**
-- حداکثر حجم فایل: 100MB
-- لینک باید مستقیم باشد
+سلام 👋
+📌 لینک مستقیم فایل و رمز را بده.
+مثال:
+pass=1234 https://example.com/file.zip
 """
 
-def parse_password(text: str) -> str:
-    """استخراج رمز از متن"""
+def parse_password(text: str | None) -> str | None:
+    if not text:
+        return None
     for part in text.split():
         if part.startswith("pass="):
             return part.split("=", 1)[1]
-    return ""
+    return None
 
-def parse_link(text: str) -> str:
-    """استخراج لینک از متن"""
+def parse_link(text: str | None) -> str | None:
+    if not text:
+        return None
     for part in text.split():
         if part.startswith("http://") or part.startswith("https://"):
             return part
-    return ""
+    return None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """دستور start"""
-    await update.message.reply_text(HELP_TEXT, parse_mode='Markdown')
+    await update.message.reply_text(HELP_TEXT)
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """پردازش پیام کاربر"""
-    try:
-        message = update.message
-        text = message.text.strip()
-        
-        # استخراج رمز و لینک
-        password = parse_password(text)
-        file_url = parse_link(text)
-        
-        if not password:
-            await message.reply_text("❌ رمز پیدا نشد!\nلطفاً با فرمت `pass=رمز` رمز را وارد کنید.", parse_mode='Markdown')
-            return
-            
-        if not file_url:
-            await message.reply_text("❌ لینک پیدا نشد!\nلطفاً یک لینک مستقیم ارسال کنید.", parse_mode='Markdown')
-            return
-        
-        await message.reply_text("⬇️ در حال دانلود فایل...")
-        
-        # دانلود فایل با requests (سازگار با همه نسخه‌ها)
-        file_data = download_file(file_url, message)
-        if not file_data:
-            return
-            
-        # ایجاد زیپ رمزدار
-        zip_buffer = create_encrypted_zip(file_data, password, message)
-        if not zip_buffer:
-            return
-            
-        # ارسال فایل
-        await send_zip_file(zip_buffer, message)
-        
-    except Exception as e:
-        logger.error(f"Error in handle_message: {e}")
-        await message.reply_text(f"❌ خطای سیستمی: {str(e)}")
+async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    text = msg.text
+    pwd = parse_password(text)
+    link = parse_link(text)
 
-def download_file(url: str, message) -> bytes:
-    """دانلود فایل از لینک با requests"""
-    try:
-        response = requests.get(url, stream=True, timeout=30)
-        response.raise_for_status()
-        
-        content_length = int(response.headers.get('Content-Length', 0))
-        if content_length > MAX_FILE_SIZE:
-            size_mb = content_length / (1024 * 1024)
-            message.reply_text(f"❌ حجم فایل زیاد است! ({size_mb:.1f}MB > 100MB)")
-            return None
-        
-        # دانلود فایل
-        file_data = bytearray()
-        downloaded = 0
-        
-        for chunk in response.iter_content(chunk_size=8192):
-            if chunk:
-                file_data.extend(chunk)
-                downloaded += len(chunk)
-                
-                if downloaded > MAX_FILE_SIZE:
-                    message.reply_text("❌ حجم فایل بیش از حد مجاز است!")
-                    return None
-        
-        message.reply_text(f"✅ دانلود کامل شد ({downloaded/(1024*1024):.1f}MB)")
-        return bytes(file_data)
-        
-    except requests.exceptions.RequestException as e:
-        message.reply_text(f"❌ خطا در دانلود: {str(e)}")
-        return None
-    except Exception as e:
-        message.reply_text(f"❌ خطا در پردازش: {str(e)}")
-        return None
+    if not pwd:
+        return await msg.reply_text("❌ رمز پیدا نشد. در پیام بنویس: pass=1234")
+    if not link:
+        return await msg.reply_text("❌ لینک فایل پیدا نشد. لینک مستقیم بده.")
 
-def create_encrypted_zip(file_data: bytes, password: str, message) -> io.BytesIO:
-    """ایجاد زیپ رمزدار"""
-    try:
-        message.reply_text("🔐 در حال رمزگذاری فایل...")
-        
-        zip_buffer = io.BytesIO()
-        
-        with pyzipper.AESZipFile(
-            zip_buffer, 
-            'w', 
-            compression=pyzipper.ZIP_DEFLATED,
-            encryption=pyzipper.WZ_AES
-        ) as zf:
-            zf.setpassword(password.encode('utf-8'))
-            zf.writestr("file", file_data)
-        
-        zip_size = len(zip_buffer.getvalue())
-        message.reply_text(f"✅ رمزگذاری کامل شد ({zip_size/(1024*1024):.1f}MB)")
-        
-        return zip_buffer
-        
-    except Exception as e:
-        message.reply_text(f"❌ خطا در رمزگذاری: {str(e)}")
-        return None
+    await msg.reply_text("⬇️ دارم دانلود می‌کنم...")
 
-async def send_zip_file(zip_buffer: io.BytesIO, message):
-    """ارسال فایل زیپ شده"""
-    try:
-        zip_buffer.seek(0)
-        
-        await message.reply_document(
-            document=zip_buffer,
-            filename="encrypted_file.zip",
-            caption="📦 فایل زیپ شده با رمز آماده است\n✅ عملیات با موفقیت انجام شد"
-        )
-        
-    except Exception as e:
-        await message.reply_text(f"❌ خطا در ارسال فایل: {str(e)}")
+    async with aiohttp.ClientSession() as session:
+        async with session.get(link) as resp:
+            if resp.status != 200:
+                return await msg.reply_text(f"❌ دانلود موفق نبود! Status code: {resp.status}")
+
+            total = int(resp.headers.get("Content-Length", 0))
+            if total > MAX_FILE_SIZE:
+                return await msg.reply_text(f"❌ حجم فایل بیش از 512MB است ({total / (1024*1024):.1f} MB)")
+
+            with tempfile.TemporaryDirectory() as td:
+                orig_path = os.path.join(td, "input_file")
+                zip_path = os.path.join(td, "file.zip")
+
+                # دانلود chunk به chunk
+                with open(orig_path, "wb") as f:
+                    async for chunk in resp.content.iter_chunked(1024*1024):
+                        f.write(chunk)
+
+                # ساخت زیپ رمزدار
+                with pyzipper.AESZipFile(zip_path, 'w',
+                                         compression=pyzipper.ZIP_DEFLATED,
+                                         encryption=pyzipper.WZ_AES) as zf:
+                    zf.setpassword(pwd.encode("utf-8"))
+                    zf.write(orig_path, "file")
+
+                size_mb = os.path.getsize(zip_path) / (1024*1024)
+                await msg.reply_text(f"✅ فشرده شد ({size_mb:.1f} MB). دارم می‌فرستم...")
+
+                await msg.reply_document(
+                    document=InputFile(zip_path, filename="file.zip"),
+                    caption="📦 زیپ رمزدار آماده شد."
+                )
 
 def main():
-    """تابع اصلی اجرای ربات"""
-    try:
-        # ساخت اپلیکیشن
-        application = Application.builder().token(BOT_TOKEN).build()
-        
-        # اضافه کردن handlerها
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-        
-        # اجرای ربات
-        print("🤖 ربات File Zipper در حال اجرا است...")
-        application.run_polling()
-        
-    except Exception as e:
-        logger.error(f"خطا در اجرای ربات: {e}")
-        print(f"❌ خطا: {e}")
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    app.run_polling()  # بدون asyncio.run()
 
 if __name__ == "__main__":
     main()
