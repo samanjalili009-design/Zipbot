@@ -38,20 +38,17 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         orig_path = os.path.join(td, doc.file_name or "input.bin")
         zip_path  = os.path.join(td, (doc.file_name or "file") + ".zip")
 
-        # ✅ دانلود به حافظه و ذخیره روی دیسک
+        # دانلود به حافظه
         file = await context.bot.get_file(doc.file_id)
         data = await file.download_as_bytearray()
         with open(orig_path, "wb") as f:
             f.write(data)
 
-        # ✅ ساخت زیپ رمزدار AES 256
-        with pyzipper.AESZipFile(zip_path, 'w',
-                                 compression=pyzipper.ZIP_DEFLATED,
-                                 encryption=pyzipper.WZ_AES) as zf:
+        # ساخت زیپ AES-256 رمزدار
+        with pyzipper.AESZipFile(zip_path, 'w', compression=pyzipper.ZIP_DEFLATED) as zf:
             zf.setpassword(pwd.encode("utf-8"))
-            zf.setencryption(pyzipper.WZ_AES, nbits=256)
-            arcname = os.path.basename(orig_path)
-            zf.write(orig_path, arcname)
+            zf.setencryption(pyzipper.WZ_AES, nbits=256)  # خیلی مهم
+            zf.write(orig_path, os.path.basename(orig_path))
 
         size_mb = os.path.getsize(zip_path) / (1024 * 1024)
         await msg.reply_text(f"✅ فشرده شد ({size_mb:.1f} MB). دارم می‌فرستم...")
