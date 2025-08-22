@@ -2,11 +2,10 @@ import os
 import logging
 import zipfile
 import tempfile
-import asyncio
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
 
-# دریافت تنظیمات از Environment Variables با مقادیر پیش‌فرض
+# دریافت تنظیمات از Environment Variables
 TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '8145993181:AAFK7PeFs_9VsHqaP3iKagj9lWTNJXKpgjk')
 ACCOUNT_HASH = os.environ.get('ACCOUNT_HASH', 'f9e86b274826212a2712b18754fabc47')
 ALLOWED_USER_ID = int(os.environ.get('ALLOWED_USER_ID', '1867911'))
@@ -23,10 +22,10 @@ def is_user_allowed(user_id: int) -> bool:
     """بررسی مجاز بودن کاربر"""
     return user_id == ALLOWED_USER_ID
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def start(update: Update, context: CallbackContext):
     """دستور شروع"""
     if not is_user_allowed(update.effective_user.id):
-        await update.message.reply_text("❌ دسترسی denied.")
+        update.message.reply_text("❌ دسترسی denied.")
         return
     
     welcome_text = f"""
@@ -42,9 +41,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 ⚡ حداکثر حجم: {MAX_FILE_SIZE // 1024 // 1024}MB
 """
-    await update.message.reply_text(welcome_text)
+    update.message.reply_text(welcome_text)
 
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def handle_document(update: Update, context: CallbackContext):
     """مدیریت دریافت فایل‌ها"""
     if not is_user_allowed(update.effective_user.id):
         return
@@ -53,7 +52,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # بررسی حجم فایل
     if document.file_size > MAX_FILE_SIZE:
-        await update.message.reply_text(
+        update.message.reply_text(
             f"❌ حجم فایل بیش از حد مجاز است! (حداکثر: {MAX_FILE_SIZE // 1024 // 1024}MB)"
         )
         return
@@ -72,19 +71,19 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total_files = len(context.user_data['files'])
     total_size = sum(f['file_size'] for f in context.user_data['files'])
     
-    await update.message.reply_text(
+    update.message.reply_text(
         f"✅ فایل '{document.file_name}' ذخیره شد.\n"
         f"📊 تعداد فایل‌ها: {total_files}\n"
         f"💾 حجم کل: {total_size // 1024 // 1024}MB"
     )
 
-async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def list_files(update: Update, context: CallbackContext):
     """نمایش لیست فایل‌های ذخیره شده"""
     if not is_user_allowed(update.effective_user.id):
         return
     
     if 'files' not in context.user_data or not context.user_data['files']:
-        await update.message.reply_text("📭 هیچ فایلی ذخیره نشده است.")
+        update.message.reply_text("📭 هیچ فایلی ذخیره نشده است.")
         return
     
     files_list = []
@@ -101,20 +100,20 @@ async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"\n💾 حجم کل: {total_size // 1024 // 1024}MB"
     )
     
-    await update.message.reply_text(message)
+    update.message.reply_text(message)
 
-async def zip_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def zip_files(update: Update, context: CallbackContext):
     """زیپ کردن فایل‌ها و ارسال"""
     if not is_user_allowed(update.effective_user.id):
-        await update.message.reply_text("❌ دسترسی denied.")
+        update.message.reply_text("❌ دسترسی denied.")
         return
     
     if 'files' not in context.user_data or not context.user_data['files']:
-        await update.message.reply_text("❌ هیچ فایلی برای زیپ کردن وجود ندارد.")
+        update.message.reply_text("❌ هیچ فایلی برای زیپ کردن وجود ندارد.")
         return
     
     # نمایش وضعیت پردازش
-    processing_msg = await update.message.reply_text("⏳ در حال پردازش فایل‌ها...")
+    processing_msg = update.message.reply_text("⏳ در حال پردازش فایل‌ها...")
     
     try:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -127,13 +126,15 @@ async def zip_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     try:
                         # آپدیت وضعیت پردازش
                         if i % 3 == 0:  # هر 3 فایل یکبار آپدیت
-                            await processing_msg.edit_text(
-                                f"⏳ پردازش فایل‌ها... ({i}/{total_files})"
+                            context.bot.edit_message_text(
+                                chat_id=processing_msg.chat_id,
+                                message_id=processing_msg.message_id,
+                                text=f"⏳ پردازش فایل‌ها... ({i}/{total_files})"
                             )
                         
-                        file = await context.bot.get_file(file_info['file_id'])
+                        file = context.bot.get_file(file_info['file_id'])
                         file_download_path = os.path.join(tmp_dir, file_info['file_name'])
-                        await file.download_to_drive(file_download_path)
+                        file.download(file_download_path)
                         zipf.write(file_download_path, file_info['file_name'])
                         
                     except Exception as e:
@@ -141,10 +142,14 @@ async def zip_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         continue
             
             # ارسال فایل زیپ شده
-            await processing_msg.edit_text("✅ فایل‌ها زیپ شدند. در حال ارسال...")
+            context.bot.edit_message_text(
+                chat_id=processing_msg.chat_id,
+                message_id=processing_msg.message_id,
+                text="✅ فایل‌ها زیپ شدند. در حال ارسال..."
+            )
             
             with open(zip_path, 'rb') as zip_file:
-                await update.message.reply_document(
+                update.message.reply_document(
                     document=zip_file,
                     caption=f"📦 {total_files} فایل زیپ شدند!",
                     filename="archive.zip"
@@ -153,14 +158,23 @@ async def zip_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # پاک کردن لیست فایل‌ها
             context.user_data['files'] = []
             
-            await processing_msg.delete()
+            context.bot.delete_message(
+                chat_id=processing_msg.chat_id,
+                message_id=processing_msg.message_id
+            )
             
     except Exception as e:
         logger.error(f"Error in zip_files: {e}")
-        await update.message.reply_text("❌ خطایی در پردازش فایل‌ها رخ داد.")
-        await processing_msg.delete()
+        update.message.reply_text("❌ خطایی در پردازش فایل‌ها رخ داد.")
+        try:
+            context.bot.delete_message(
+                chat_id=processing_msg.chat_id,
+                message_id=processing_msg.message_id
+            )
+        except:
+            pass
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def cancel(update: Update, context: CallbackContext):
     """پاک کردن فایل‌های ذخیره شده"""
     if not is_user_allowed(update.effective_user.id):
         return
@@ -168,11 +182,11 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if 'files' in context.user_data and context.user_data['files']:
         file_count = len(context.user_data['files'])
         context.user_data['files'] = []
-        await update.message.reply_text(f"✅ {file_count} فایل ذخیره شده پاک شدند.")
+        update.message.reply_text(f"✅ {file_count} فایل ذخیره شده پاک شدند.")
     else:
-        await update.message.reply_text("📭 هیچ فایلی برای پاک کردن وجود ندارد.")
+        update.message.reply_text("📭 هیچ فایلی برای پاک کردن وجود ندارد.")
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def help_command(update: Update, context: CallbackContext):
     """راهنما"""
     if not is_user_allowed(update.effective_user.id):
         return
@@ -196,37 +210,41 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • حداکثر حجم فایل: {MAX_FILE_SIZE // 1024 // 1024}MB
 • فقط کاربر با آیدی {ALLOWED_USER_ID} مجاز است
 """
-    await update.message.reply_text(help_text)
+    update.message.reply_text(help_text)
 
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def error_handler(update: Update, context: CallbackContext):
     """مدیریت خطاهای全局"""
     logger.error(f"Error occurred: {context.error}")
     if update and update.effective_message:
-        await update.effective_message.reply_text("❌ خطای سیستمی رخ داد.")
+        update.effective_message.reply_text("❌ خطای سیستمی رخ داد.")
 
 def main():
     """اجرای اصلی ربات"""
     try:
-        # ایجاد اپلیکیشن
-        application = Application.builder().token(TOKEN).build()
+        # ایجاد updater
+        updater = Updater(TOKEN, use_context=True)
+        
+        # دریافت dispatcher
+        dp = updater.dispatcher
         
         # اضافه کردن handlerها
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CommandHandler("zip", zip_files))
-        application.add_handler(CommandHandler("list", list_files))
-        application.add_handler(CommandHandler("cancel", cancel))
-        application.add_handler(CommandHandler("help", help_command))
-        application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+        dp.add_handler(CommandHandler("start", start))
+        dp.add_handler(CommandHandler("zip", zip_files))
+        dp.add_handler(CommandHandler("list", list_files))
+        dp.add_handler(CommandHandler("cancel", cancel))
+        dp.add_handler(CommandHandler("help", help_command))
+        dp.add_handler(MessageHandler(Filters.document, handle_document))
         
         # اضافه کردن handler خطا
-        application.add_error_handler(error_handler)
+        dp.add_error_handler(error_handler)
         
         logger.info("🤖 ربات ZipBot در حال اجراست...")
         logger.info(f"👤 کاربر مجاز: {ALLOWED_USER_ID}")
         logger.info(f"⚡ حداکثر حجم فایل: {MAX_FILE_SIZE // 1024 // 1024}MB")
         
         # شروع ربات
-        application.run_polling()
+        updater.start_polling()
+        updater.idle()
         
     except Exception as e:
         logger.error(f"Failed to start bot: {e}")
