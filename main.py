@@ -6,7 +6,6 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 import logging
 from typing import Dict
 import math
-import asyncio
 import aiohttp
 import aiofiles
 from pathlib import Path
@@ -26,10 +25,10 @@ CHANNEL_ID = -1001093039800
 MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2 گیگابایت برای هر فایل
 MAX_TOTAL_SIZE = 4 * 1024 * 1024 * 1024  # 4 گیگابایت برای کل آرشیو
 MAX_FILES_COUNT = 20  # حداکثر 20 فایل
-CHUNK_SIZE = 10 * 1024 * 1024  # 10 مگابایت برای هر chunk
+CHUNK_SIZE = 2 * 1024 * 1024  # 2 مگابایت برای هر chunk
 
 # حالت‌های گفتگو
-WAITING_PASSWORD, WAITING_FILES, PROCESSING = range(3)
+WAITING_PASSWORD, WAITING_FILES = range(2)
 user_data: Dict[int, Dict] = {}
 
 HELP_TEXT = f"""🚀 سلام👋 
@@ -47,12 +46,7 @@ HELP_TEXT = f"""🚀 سلام👋
 ⚡ قابلیت‌های ویژه:
 • پشتیبانی از فایل‌های تا ۲ گیگابایت
 • فشرده‌سازی با رمزگذاری AES-256
-• دانلود تکه‌ای برای فایل‌های بزرگ
-
-📊 پس از ارسال /zip:
-1. رمز دلخواه خود را وارد کنید
-2. فایل‌های خود را ارسال کنید
-3. پس از اتمام، /done را ارسال کنید"""
+• دانلود تکه‌ای برای فایل‌های بزرگ"""
 
 async def check_membership(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """چک کردن عضویت کاربر در کانال"""
@@ -73,32 +67,49 @@ def format_size(size_bytes):
     s = round(size_bytes / p, 2)
     return f"{s} {size_names[i]}"
 
-async def download_large_file(file_url: str, file_path: str, file_size: int, update: Update):
-    """دانلود فایل‌های بزرگ با نمایش پیشرفت"""
+async def download_large_file_telegram(file_instance, file_path: str, file_size: int, update: Update, bot):
+    """دانلود فایل‌های بزرگ از تلگرام با نمایش پیشرفت"""
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(file_url) as response:
-                if response.status != 200:
-                    raise Exception(f"Download failed with status {response.status}")
+        downloaded = 0
+        last_progress = 0
+        
+        async with aiofiles.open(file_path, 'wb') as f:
+            # استفاده از دانلود تدریجی تلگرام
+            async for chunk in bot.get_file(file_instance.file_id).download_as_bytearray():
+                await f.write(chunk)
+                downloaded += len(chunk)
                 
-                downloaded = 0
-                async with aiofiles.open(file_path, 'wb') as f:
-                    async for chunk in response.content.iter_chunked(CHUNK_SIZE):
-                        await f.write(chunk)
-                        downloaded += len(chunk)
-                        
-                        # ارسال وضعیت هر 25%
-                        progress = (downloaded / file_size) * 100
-                        if progress % 25 < 1 and progress > 0:
-                            await update.message.reply_text(
-                                f"📥 دانلود: {format_size(downloaded)} / {format_size(file_size)} "
-                                f"({int(progress)}%)"
-                            )
+                # ارسال وضعیت هر 10%
+                progress = (downloaded / file_size) * 100
+                if progress - last_progress >= 10:
+                    await update.message.reply_text(
+                        f"📥 دانلود: {format_size(downloaded)} / {format_size(file_size)} "
+                        f"({int(progress)}%)"
+                    )
+                    last_progress = progress
         
         return True
+        
     except Exception as e:
         logger.error(f"Download error: {e}")
         return False
+
+async def download_with_retry(file_instance, file_path: str, file_size: int, update: Update, bot, max_retries=3):
+    """دانلود با قابلیت تکرار در صورت خطا"""
+    for attempt in range(max_retries):
+        try:
+            await update.message.reply_text(f"📥 شروع دانلود (تلاش {attempt + 1}/{max_retries})...")
+            
+            success = await download_large_file_telegram(file_instance, file_path, file_size, update, bot)
+            if success:
+                return True
+                
+        except Exception as e:
+            logger.error(f"Download attempt {attempt + 1} failed: {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2)  # انتظار قبل از تلاش مجدد
+                
+    return False
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -133,9 +144,7 @@ async def limits_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 💡 نکات فنی:
 - از رمزگذاری AES-256 استفاده می‌شود
 - فایل‌های بزرگ به صورت تکه‌ای دانلود می‌شوند
-- امکان فشرده‌سازی فایل‌های بسیار بزرگ وجود دارد
-
-⚡ برای شروع: /zip"""
+- امکان فشرده‌سازی فایل‌های بسیار بزرگ وجود دارد"""
 
     await update.message.reply_text(limits_text)
 
@@ -201,7 +210,6 @@ async def receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ لطفاً ابتدا دستور /zip را اجرا کنید.")
         return ConversationHandler.END
     
-    # بررسی تعداد فایل‌ها
     if len(user_data[user_id]['files']) >= MAX_FILES_COUNT:
         await update.message.reply_text(
             f"❌ حداکثر تعداد فایل‌ها ({MAX_FILES_COUNT}) رسیده است.\n"
@@ -212,14 +220,12 @@ async def receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         document = update.message.document
         
-        # بررسی حجم فایل
         if document.file_size > MAX_FILE_SIZE:
             await update.message.reply_text(
                 f"❌ حجم فایل ({format_size(document.file_size)}) بیش از حد مجاز ({format_size(MAX_FILE_SIZE)}) است!"
             )
             return WAITING_FILES
         
-        # بررسی حجم کل
         new_total_size = user_data[user_id]['total_size'] + document.file_size
         if new_total_size > MAX_TOTAL_SIZE:
             await update.message.reply_text(
@@ -228,20 +234,22 @@ async def receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return WAITING_FILES
         
-        # ایجاد پوشه موقت برای ذخیره فایل
+        # ایجاد پوشه موقت
         temp_dir = Path(tempfile.mkdtemp())
         temp_file_path = temp_dir / document.file_name
         
-        # دانلود فایل (برای فایل‌های بزرگ از دانلود تکه‌ای استفاده می‌شود)
-        if document.file_size > 50 * 1024 * 1024:  # برای فایل‌های بزرگتر از 50 مگابایت
+        # دانلود فایل - روش جدید
+        if document.file_size > 10 * 1024 * 1024:  # برای فایل‌های بزرگتر از 10 مگابایت
             await update.message.reply_text(
                 f"📥 شروع دانلود فایل بزرگ...\n"
                 f"📊 حجم: {format_size(document.file_size)}\n"
                 f"⏳ لطفاً منتظر بمانید..."
             )
             
-            file_url = await document.get_file()
-            success = await download_large_file(file_url.file_path, str(temp_file_path), document.file_size, update)
+            # استفاده از متد دانلود مستقیم تلگرام
+            success = await download_with_retry(
+                document, str(temp_file_path), document.file_size, update, context.bot
+            )
             
             if not success:
                 await update.message.reply_text("❌ خطا در دانلود فایل. لطفاً دوباره امتحان کنید.")
@@ -301,7 +309,7 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⏳ این عملیات ممکن است چند دقیقه طول بکشد..."
         )
         
-        # ایجاد فایل زیپ رمزدار
+        # ایجاد فایل زیپ
         zip_temp_dir = Path(tempfile.mkdtemp())
         zip_file_path = zip_temp_dir / "archive.zip"
         
@@ -316,7 +324,6 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for i, file_info in enumerate(user_data[user_id]['files']):
                 zf.write(file_info['path'], file_info['name'])
                 
-                # ارسال وضعیت پیشرفت هر 25%
                 progress = ((i + 1) / file_count) * 100
                 if progress % 25 < 1 and progress > 0:
                     await processing_msg.edit_text(
@@ -337,27 +344,29 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"💚 از حمایت شما متشکریم! {CHANNEL_USERNAME}"
         )
         
-        # پاکسازی فایل‌های موقت
+        # پاکسازی
         for file_info in user_data[user_id]['files']:
             try:
-                os.unlink(file_info['path'])
-                if 'temp_dir' in file_info:
+                if os.path.exists(file_info['path']):
+                    os.unlink(file_info['path'])
+                if 'temp_dir' in file_info and os.path.exists(file_info['temp_dir']):
                     os.rmdir(file_info['temp_dir'])
-            except:
-                pass
+            except Exception as e:
+                logger.error(f"Cleanup error: {e}")
         
         try:
-            os.unlink(zip_file_path)
-            os.rmdir(zip_temp_dir)
-        except:
-            pass
+            if os.path.exists(zip_file_path):
+                os.unlink(zip_file_path)
+            if os.path.exists(zip_temp_dir):
+                os.rmdir(zip_temp_dir)
+        except Exception as e:
+            logger.error(f"Zip cleanup error: {e}")
         
         await update.message.reply_text(
             "🎉 عملیات با موفقیت завер شد!\n\n"
             f"📦 فایل زیپ با حجم {format_size(zip_size)} ارسال شد.\n"
             f"🔐 رمز فایل: {user_data[user_id]['password']}\n\n"
-            f"💚 برای فشرده‌سازی بیشتر، دوباره /zip را ارسال کنید.\n"
-            f"📢 {CHANNEL_USERNAME}"
+            f"💚 برای فشرده‌سازی بیشتر، دوباره /zip را ارسال کنید."
         )
         
     except Exception as e:
@@ -365,7 +374,6 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ خطا در ایجاد فایل زیپ. لطفاً دوباره امتحان کنید.")
     
     finally:
-        # پاکسازی داده کاربر
         if user_id in user_data:
             del user_data[user_id]
     
@@ -374,15 +382,15 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
-    # پاکسازی فایل‌های موقت
     if user_id in user_data:
         for file_info in user_data[user_id]['files']:
             try:
-                os.unlink(file_info['path'])
-                if 'temp_dir' in file_info:
+                if os.path.exists(file_info['path']):
+                    os.unlink(file_info['path'])
+                if 'temp_dir' in file_info and os.path.exists(file_info['temp_dir']):
                     os.rmdir(file_info['temp_dir'])
-            except:
-                pass
+            except Exception as e:
+                logger.error(f"Cleanup error: {e}")
         del user_data[user_id]
     
     await update.message.reply_text("❌ عملیات کنسل شد.")
@@ -437,8 +445,8 @@ def main():
         application.add_handler(conv_handler)
         application.add_error_handler(error_handler)
         
-        logger.info("Bot is starting with large file support...")
-        print("🤖 Bot is starting with 2GB file support...")
+        logger.info("Bot is starting with improved download...")
+        print("🤖 Bot is starting with improved download system...")
         application.run_polling()
         
     except Exception as e:
