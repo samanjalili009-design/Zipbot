@@ -2,8 +2,6 @@ import os
 import logging
 import zipfile
 import tempfile
-import PIL.Image
-import io
 from telegram import Update
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
 
@@ -19,7 +17,7 @@ logging.basicConfig(
     level=logging.INFO,
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler('bot.log')
+        logging.FileHandler('bot.log', encoding='utf-8')
     ]
 )
 logger = logging.getLogger(__name__)
@@ -63,7 +61,7 @@ def handle_document(update: Update, context: CallbackContext):
         document = update.message.document
         
         # بررسی حجم فایل
-        if document.file_size > MAX_FILE_SIZE:
+        if document.file_size and document.file_size > MAX_FILE_SIZE:
             update.message.reply_text(
                 f"❌ حجم فایل بیش از حد مجاز است! (حداکثر: {MAX_FILE_SIZE // 1024 // 1024}MB)"
             )
@@ -73,10 +71,12 @@ def handle_document(update: Update, context: CallbackContext):
         if 'files' not in context.user_data:
             context.user_data['files'] = []
         
+        file_name = document.file_name or f"file_{len(context.user_data['files']) + 1}"
+        
         context.user_data['files'].append({
             'file_id': document.file_id,
-            'file_name': document.file_name or f"file_{len(context.user_data['files'])}",
-            'file_size': document.file_size,
+            'file_name': file_name,
+            'file_size': document.file_size or 0,
             'mime_type': document.mime_type
         })
         
@@ -84,12 +84,12 @@ def handle_document(update: Update, context: CallbackContext):
         total_size = sum(f['file_size'] for f in context.user_data['files'])
         
         update.message.reply_text(
-            f"✅ فایل '{document.file_name}' ذخیره شد.\n"
+            f"✅ فایل '{file_name}' ذخیره شد.\n"
             f"📊 تعداد فایل‌ها: {total_files}\n"
             f"💾 حجم کل: {total_size // 1024 // 1024}MB"
         )
         
-        logger.info(f"File received: {document.file_name}, size: {document.file_size}")
+        logger.info(f"File received: {file_name}, size: {document.file_size}")
         
     except Exception as e:
         logger.error(f"Error handling document: {e}")
@@ -109,8 +109,9 @@ def list_files(update: Update, context: CallbackContext):
         total_size = 0
         
         for i, file_info in enumerate(context.user_data['files'], 1):
-            files_list.append(f"{i}. {file_info['file_name']} ({file_info['file_size'] // 1024}KB)")
-            total_size += file_info['file_size']
+            size_kb = file_info['file_size'] // 1024 if file_info['file_size'] else 0
+            files_list.append(f"{i}. {file_info['file_name']} ({size_kb}KB)")
+            total_size += file_info['file_size'] or 0
         
         message = (
             "📋 فایل‌های ذخیره شده:\n" +
@@ -146,11 +147,14 @@ def zip_files(update: Update, context: CallbackContext):
                 for i, file_info in enumerate(context.user_data['files'], 1):
                     try:
                         if i % 3 == 0:
-                            context.bot.edit_message_text(
-                                chat_id=processing_msg.chat_id,
-                                message_id=processing_msg.message_id,
-                                text=f"⏳ پردازش فایل‌ها... ({i}/{total_files})"
-                            )
+                            try:
+                                context.bot.edit_message_text(
+                                    chat_id=processing_msg.chat_id,
+                                    message_id=processing_msg.message_id,
+                                    text=f"⏳ پردازش فایل‌ها... ({i}/{total_files})"
+                                )
+                            except:
+                                pass
                         
                         file = context.bot.get_file(file_info['file_id'])
                         file_download_path = os.path.join(tmp_dir, file_info['file_name'])
@@ -161,11 +165,14 @@ def zip_files(update: Update, context: CallbackContext):
                         logger.error(f"Error processing file {file_info['file_name']}: {e}")
                         continue
             
-            context.bot.edit_message_text(
-                chat_id=processing_msg.chat_id,
-                message_id=processing_msg.message_id,
-                text="✅ فایل‌ها زیپ شدند. در حال ارسال..."
-            )
+            try:
+                context.bot.edit_message_text(
+                    chat_id=processing_msg.chat_id,
+                    message_id=processing_msg.message_id,
+                    text="✅ فایل‌ها زیپ شدند. در حال ارسال..."
+                )
+            except:
+                pass
             
             with open(zip_path, 'rb') as zip_file:
                 update.message.reply_document(
@@ -175,10 +182,14 @@ def zip_files(update: Update, context: CallbackContext):
                 )
             
             context.user_data['files'] = []
-            context.bot.delete_message(
-                chat_id=processing_msg.chat_id,
-                message_id=processing_msg.message_id
-            )
+            
+            try:
+                context.bot.delete_message(
+                    chat_id=processing_msg.chat_id,
+                    message_id=processing_msg.message_id
+                )
+            except:
+                pass
             
             logger.info(f"Successfully zipped and sent {total_files} files")
             
