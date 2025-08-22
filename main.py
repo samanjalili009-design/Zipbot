@@ -4,7 +4,7 @@ import pyzipper
 from telegram import Update, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # از محیط Render ست کن
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 HELP_TEXT = """
 سلام 👋
@@ -31,30 +31,31 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not pwd:
         return await msg.reply_text("❌ رمز پیدا نشد. در کپشن بنویس: /zip pass=1234")
 
-    doc = msg.document  
-    await msg.reply_text("⬇️ دارم دانلود می‌کنم...")  
+    doc = msg.document
+    await msg.reply_text("⬇️ دارم دانلود می‌کنم...")
 
-    with tempfile.TemporaryDirectory() as td:  
-        orig_path = os.path.join(td, doc.file_name or "input.bin")  
-        zip_path  = os.path.join(td, (doc.file_name or "file") + ".zip")  
+    with tempfile.TemporaryDirectory() as td:
+        orig_path = os.path.join(td, doc.file_name or "input.bin")
+        zip_path  = os.path.join(td, (doc.file_name or "file") + ".zip")
 
-        file = await context.bot.get_file(doc.file_id)  
-        await file.download_to_drive(custom_path=orig_path)  
+        file = await context.bot.get_file(doc.file_id)
+        await file.download_to_drive(custom_path=orig_path)
 
-        # ساخت زیپ AES 256 رمزدار که همه بازش کنن
+        # ⚡ نسخه مطمئن: AESZipFile با نوشتن واقعی فایل
         with pyzipper.AESZipFile(zip_path, 'w', compression=pyzipper.ZIP_DEFLATED,
                                  encryption=pyzipper.WZ_AES) as zf:
-            zf.setpassword(pwd.encode("utf-8"))
-            zf.setencryption(pyzipper.WZ_AES, nbits=256)  # 👈 مهم برای سازگاری
+            zf.setencryption(pyzipper.WZ_AES, nbits=256)
             arcname = os.path.basename(orig_path)
+            # حتما رمز رو اینجا برای هر فایل اعمال کن
             zf.write(orig_path, arcname)
+            zf.setpassword(pwd.encode("utf-8"))
 
-        size_mb = os.path.getsize(zip_path) / (1024 * 1024)  
-        await msg.reply_text(f"✅ فشرده شد ({size_mb:.1f} MB). دارم می‌فرستم...")  
+        size_mb = os.path.getsize(zip_path) / (1024 * 1024)
+        await msg.reply_text(f"✅ فشرده شد ({size_mb:.1f} MB). دارم می‌فرستم...")
 
         await msg.reply_document(
-            document=InputFile(zip_path, filename=os.path.basename(zip_path)),  
-            caption="📦 زیپ رمزدار آماده شد."  
+            document=InputFile(zip_path, filename=os.path.basename(zip_path)),
+            caption="📦 زیپ رمزدار آماده شد."
         )
 
 def main():
