@@ -5,7 +5,6 @@ from telegram import Update, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, ConversationHandler
 import logging
 from typing import Dict
-import asyncio
 
 # تنظیمات لاگ
 logging.basicConfig(
