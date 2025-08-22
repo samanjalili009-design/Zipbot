@@ -5,6 +5,8 @@ from telegram import Update, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 import logging
 import asyncio
+import aiohttp
+import aiofiles
 
 # تنظیمات لاگ
 logging.basicConfig(
@@ -14,41 +16,63 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB - محدودیت تلگرام
+MAX_FILE_SIZE = 300 * 1024 * 1024  # 300MB
+CHUNK_SIZE = 10 * 1024 * 1024  # 10MB chunks برای دانلود
 
 HELP_TEXT = """
 سلام 👋
 📦 بات فشرده‌ساز رمزدار
 
-📌 برای فایل‌های کوچک (تا ۲۰ مگابایت):
-• فایل را ارسال کنید
-• در کپشن بنویسید: /zip pass=رمزتون
+📌 فایل رو برای من بفرست و در کپشنش بنویس:
+/zip pass=رمزتو
 
-📌 برای فایل‌های بزرگ (تا ۳۰۰ مگابایت):
-1. فایل را با نرم‌افزار 7-Zip یا WinRAR به قسمت‌های ۲۰ مگابایتی تقسیم کنید
-2. قسمت اول را ارسال کنید و در کپشن بنویسید: /bigzip pass=رمزتون
-3. بات به شما دستورالعمل ارسال قسمت‌های بعدی را می‌دهد
+مثال: 
+/zip pass=1234
 
-مثال: /zip pass=1234
-مثال: /bigzip pass=1234
+⚠️ حداکثر حجم: 300 مگابایت
 """
 
-def parse_password(text: str) -> str | None:
-    """استخراج رمز از متن"""
-    if not text:
+def parse_password(caption: str | None) -> str | None:
+    if not caption:
         return None
     
     patterns = ["pass=", "password=", "رمز=", "پسورد="]
-    text_lower = text.lower()
+    caption_lower = caption.lower()
     
     for pattern in patterns:
-        if pattern in text_lower:
-            parts = text.split()
+        if pattern in caption_lower:
+            parts = caption.split()
             for part in parts:
                 if part.lower().startswith(pattern):
                     return part.split("=", 1)[1]
     
     return None
+
+async def download_large_file(file_id, file_path, bot):
+    """دانلود فایل‌های بزرگ با chunking"""
+    try:
+        # دریافت لینک دانلود مستقیم
+        file = await bot.get_file(file_id)
+        file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
+        
+        logger.info(f"Downloading from: {file_url}")
+        
+        # دانلود با aiohttp به صورت chunked
+        async with aiohttp.ClientSession() as session:
+            async with session.get(file_url) as response:
+                if response.status != 200:
+                    return False
+                
+                # دانلود به صورت chunked
+                async with aiofiles.open(file_path, 'wb') as f:
+                    async for chunk in response.content.iter_chunked(CHUNK_SIZE):
+                        await f.write(chunk)
+        
+        return os.path.exists(file_path) and os.path.getsize(file_path) > 0
+        
+    except Exception as e:
+        logger.error(f"Download error: {e}")
+        return False
 
 async def create_encrypted_zip(input_path, output_path, password):
     """ایجاد فایل زیپ رمزدار"""
@@ -66,11 +90,63 @@ async def create_encrypted_zip(input_path, output_path, password):
         logger.error(f"Zip creation error: {e}")
         return False
 
+async def split_and_send_large_file(message, file_path, password):
+    """تقسیم و ارسال فایل‌های بزرگ"""
+    try:
+        file_size = os.path.getsize(file_path)
+        chunk_size = 45 * 1024 * 1024  # 45MB برای تلگرام
+        total_chunks = (file_size + chunk_size - 1) // chunk_size
+        
+        if total_chunks == 1:
+            # فایل کوچک است
+            with open(file_path, 'rb') as f:
+                await message.reply_document(
+                    document=InputFile(f, filename=os.path.basename(file_path)),
+                    caption=f"📦 فایل زیپ رمزدار\n🔐 رمز: {password}"
+                )
+            return True
+        
+        # تقسیم فایل بزرگ
+        await message.reply_text(f"📦 فایل به {total_chunks} قسمت تقسیم شد...")
+        
+        with open(file_path, 'rb') as f:
+            for i in range(total_chunks):
+                chunk_data = f.read(chunk_size)
+                if not chunk_data:
+                    break
+                
+                chunk_name = f"{os.path.basename(file_path)}.part{i+1:03d}"
+                chunk_path = os.path.join(os.path.dirname(file_path), chunk_name)
+                
+                # ذخیره chunk موقت
+                with open(chunk_path, 'wb') as chunk_file:
+                    chunk_file.write(chunk_data)
+                
+                # ارسال chunk
+                with open(chunk_path, 'rb') as chunk_file:
+                    await message.reply_document(
+                        document=InputFile(chunk_file, filename=chunk_name),
+                        caption=f"📦 قسمت {i+1} از {total_chunks}\n🔐 رمز: {password}"
+                    )
+                
+                # حذف فایل موقت
+                try:
+                    os.unlink(chunk_path)
+                except:
+                    pass
+                
+                await asyncio.sleep(1)  # تأخیر بین ارسال
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Split and send error: {e}")
+        return False
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(HELP_TEXT)
 
-async def handle_small_zip(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """پردازش فایل‌های کوچک (تا 20MB)"""
+async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         msg = update.message
         
@@ -78,92 +154,60 @@ async def handle_small_zip(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("❌ لطفاً یک فایل ارسال کنید.")
             return
         
-        # بررسی حجم فایل
-        doc = msg.document
-        file_size = doc.file_size or 0
-        
-        if file_size > MAX_FILE_SIZE:
-            await msg.reply_text(
-                f"❌ فایل شما {file_size//1024//1024}MB است که بیشتر از حد مجاز (20MB) می‌باشد.\n\n"
-                "📌 برای فایل‌های بزرگ:\n"
-                "1. فایل را با 7-Zip به قسمت‌های 20MB تقسیم کنید\n"
-                "2. دستور /bigzip را استفاده کنید"
-            )
-            return
-        
-        # استخراج رمز
+        # بررسی caption برای رمز
         pwd = parse_password(msg.caption or "")
         if not pwd:
             return await msg.reply_text("❌ رمز پیدا نشد. در کپشن بنویسید: /zip pass=1234")
         
-        await msg.reply_text("⬇️ در حال دانلود فایل...")
+        doc = msg.document
+        file_name = doc.file_name or "file"
+        file_size = doc.file_size or 0
+        
+        # بررسی حجم فایل
+        if file_size > MAX_FILE_SIZE:
+            return await msg.reply_text(f"❌ حجم فایل بیشتر از {MAX_FILE_SIZE//1024//1024}MB است")
+        
+        await msg.reply_text("⬇️ در حال دانلود فایل... (این ممکن است چند دقیقه طول بکشد)")
         
         with tempfile.TemporaryDirectory() as td:
-            # دانلود فایل
-            file = await context.bot.get_file(doc.file_id)
-            orig_path = os.path.join(td, doc.file_name or "file")
-            await file.download_to_drive(orig_path)
+            orig_path = os.path.join(td, file_name)
             
-            if not os.path.exists(orig_path):
-                return await msg.reply_text("❌ خطا در دانلود فایل")
+            # دانلود فایل با روش chunked
+            download_success = await download_large_file(doc.file_id, orig_path, context.bot)
             
-            # ایجاد زیپ
-            zip_name = f"{os.path.splitext(os.path.basename(orig_path))[0]}.zip"
-            zip_path = os.path.join(td, zip_name)
+            if not download_success:
+                return await msg.reply_text("❌ خطا در دانلود فایل. لطفاً دوباره تلاش کنید.")
+            
+            downloaded_size = os.path.getsize(orig_path)
+            if downloaded_size == 0:
+                return await msg.reply_text("❌ فایل دانلود شده خالی است")
             
             await msg.reply_text("🔒 در حال رمزگذاری فایل...")
             
-            success = await create_encrypted_zip(orig_path, zip_path, pwd)
-            if not success or not os.path.exists(zip_path):
+            # ایجاد فایل زیپ
+            zip_name = f"{os.path.splitext(file_name)[0]}.zip"
+            zip_path = os.path.join(td, zip_name)
+            
+            zip_success = await create_encrypted_zip(orig_path, zip_path, pwd)
+            if not zip_success:
                 return await msg.reply_text("❌ خطا در ایجاد فایل زیپ")
             
-            # ارسال فایل
             zip_size = os.path.getsize(zip_path)
             size_mb = zip_size / (1024 * 1024)
             
-            await msg.reply_text(f"✅ فایل رمزگذاری شد ({size_mb:.1f} MB)")
+            await msg.reply_text(f"✅ فایل رمزگذاری شد ({size_mb:.1f} MB). در حال ارسال...")
             
-            with open(zip_path, 'rb') as f:
-                await msg.reply_document(
-                    document=InputFile(f, filename=zip_name),
-                    caption=f"📦 فایل زیپ رمزدار\n🔐 رمز: {pwd}"
-                )
+            # ارسال فایل
+            send_success = await split_and_send_large_file(msg, zip_path, pwd)
+            
+            if send_success:
+                await msg.reply_text("🎉 فایل با موفقیت ارسال شد!")
+            else:
+                await msg.reply_text("❌ خطا در ارسال فایل")
                 
     except Exception as e:
-        logger.error(f"Small zip error: {e}")
-        await update.message.reply_text("❌ خطایی رخ داد. لطفاً دوباره تلاش کنید.")
-
-async def handle_big_zip_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """ارسال اطلاعات برای فایل‌های بزرگ"""
-    info_text = """
-📦 راهنمای فایل‌های بزرگ:
-
-1. 🔧 فایل خود را با نرم‌افزار 7-Zip یا WinRAR به قسمت‌های ۲۰ مگابایتی تقسیم کنید
-
-2. 📤 قسمت اول فایل را ارسال کنید و در کپشن بنویسید:
-   /bigzip pass=رمزتون
-
-3. 🔄 بات به شما می‌گوید که قسمت بعدی را ارسال کنید
-
-4. 🎯 بعد از ارسال تمام قسمتها، بات فایل نهایی را برای شما می‌سازد
-
-💡 نکته: اسم فایل‌های تقسیم شده باید به صورت زیر باشد:
-   filename.7z.001
-   filename.7z.002
-   filename.7z.003
-   ...
-
-📥 برای دانلود 7-Zip:
-   https://www.7-zip.org/
-"""
-    await update.message.reply_text(info_text)
-
-async def handle_big_zip(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """هدایت کاربر به راهنمای فایل‌های بزرگ"""
-    await update.message.reply_text(
-        "📦 برای فایل‌های بزرگ، لطفاً ابتدا راهنمای زیر را مطالعه کنید:\n"
-        "دستور: /bigzipinfo"
-    )
+        logger.error(f"General error: {str(e)}")
+        await msg.reply_text("❌ خطایی رخ داد. لطفاً دوباره تلاش کنید.")
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Update {update} caused error: {context.error}")
@@ -175,31 +219,17 @@ def main():
     try:
         app = Application.builder().token(BOT_TOKEN).build()
         
-        # handlers
         app.add_handler(CommandHandler("start", start))
-        app.add_handler(CommandHandler("bigzipinfo", handle_big_zip_info))
-        app.add_handler(CommandHandler("bigzip", handle_big_zip))
-        
-        # handler برای فایل‌های معمولی با کپشن /zip
-        app.add_handler(MessageHandler(
-            filters.Document.ALL & filters.CaptionRegex(r'^/zip'), 
-            handle_small_zip
-        ))
-        
-        # handler برای سایر فایل‌ها (بدون کپشن مناسب)
-        app.add_handler(MessageHandler(
-            filters.Document.ALL, 
-            lambda update, context: update.message.reply_text(
-                "❌ لطفاً از دستور /zip در کپشن استفاده کنید\n"
-                "مثال: /zip pass=1234\n\n"
-                "برای فایل‌های بزرگ: /bigzipinfo"
-            )
-        ))
-        
+        app.add_handler(MessageHandler(filters.Document.ALL, on_document))
         app.add_error_handler(error_handler)
         
-        logger.info("Bot is starting...")
-        app.run_polling()
+        logger.info("Bot is starting with large file support...")
+        app.run_polling(
+            read_timeout=60,
+            write_timeout=60,
+            connect_timeout=60,
+            pool_timeout=60
+        )
         
     except Exception as e:
         logger.error(f"Failed to start bot: {e}")
