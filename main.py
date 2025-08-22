@@ -1,10 +1,10 @@
 import os
 import tempfile
 import pyzipper
-from telegram import Update, InputFile
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
 import logging
 import shutil
+from datetime import datetime
+from io import BytesIO
 
 # تنظیمات لاگ
 logging.basicConfig(
@@ -12,6 +12,21 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+try:
+    from telegram import Update, InputFile
+    from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+except ImportError:
+    # Fallback برای نسخه‌های مختلف
+    try:
+        from telegram import Update
+        from telegram import InputFile
+        from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+    except:
+        from telegram import Update
+        from telegram import InputFile
+        from telegram.ext import Updater, CommandHandler, MessageHandler, CallbackContext
+        from telegram.ext.filters import Filters
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
@@ -180,11 +195,26 @@ def on_text(update: Update, context: CallbackContext):
         
         # شروع پردازش
         msg.reply_text("⏳ در حال پردازش فایل‌ها...")
-        context.dispatcher.run_async(process_files, user_id, msg, text)
+        process_files(user_id, msg, text)
         
     except Exception as e:
         logger.error(f"Text processing error: {e}")
         msg.reply_text("❌ خطایی رخ داد. لطفاً دوباره تلاش کنید.")
+
+def send_document_safe(bot, chat_id, document_path, filename, caption):
+    """ارسال فایل با مدیریت خطا"""
+    try:
+        with open(document_path, 'rb') as f:
+            bot.send_document(
+                chat_id=chat_id,
+                document=f,
+                filename=filename,
+                caption=caption
+            )
+        return True
+    except Exception as e:
+        logger.error(f"Send document error: {e}")
+        return False
 
 def process_files(user_id, message, password):
     """پردازش همه فایل‌ها و ایجاد زیپ"""
@@ -224,7 +254,6 @@ def process_files(user_id, message, password):
         message.reply_text("🔒 در حال ایجاد فایل زیپ رمزدار...")
         
         # ایجاد فایل زیپ
-        from datetime import datetime
         zip_name = f"archive_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
         zip_path = os.path.join(session.temp_dir, zip_name)
         
@@ -255,18 +284,19 @@ def process_files(user_id, message, password):
         # ارسال فایل زیپ
         message.reply_text(f"✅ فایل زیپ ایجاد شد ({size_mb:.1f} MB)")
         
-        with open(zip_path, 'rb') as f:
-            message.reply_document(
-                document=InputFile(f, filename=zip_name),
-                caption=(
-                    f"📦 فایل زیپ رمزدار\n"
-                    f"🔐 رمز: {password}\n"
-                    f"📁 تعداد فایل‌ها: {len(downloaded_files)}\n"
-                    f"💾 حجم: {size_mb:.1f}MB"
-                )
-            )
+        # استفاده از روش مستقیم برای ارسال فایل
+        success = send_document_safe(
+            message.bot,
+            message.chat_id,
+            zip_path,
+            zip_name,
+            f"📦 فایل زیپ رمزدار\n🔐 رمز: {password}\n📁 تعداد فایل‌ها: {len(downloaded_files)}\n💾 حجم: {size_mb:.1f}MB"
+        )
         
-        message.reply_text("🎉 عملیات با موفقیت完成 شد!")
+        if success:
+            message.reply_text("🎉 عملیات با موفقیت完成 شد!")
+        else:
+            message.reply_text("⚠️ فایل ایجاد شد اما ارسال با مشکل مواجه شد")
         
         # پاکسازی
         session.cleanup()
@@ -290,7 +320,7 @@ def main():
         raise ValueError("BOT_TOKEN environment variable is required")
     
     try:
-        # استفاده از Updater به جای Application
+        # استفاده از Updater
         updater = Updater(token=BOT_TOKEN, use_context=True)
         dispatcher = updater.dispatcher
         
@@ -299,7 +329,7 @@ def main():
         dispatcher.add_handler(CommandHandler("done", done_command))
         dispatcher.add_handler(CommandHandler("cancel", cancel_command))
         dispatcher.add_handler(MessageHandler(Filters.document, on_document))
-        dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, on_text))
+        dispatcher.add_handler(MessageHandler(Filters.text, on_text))
         dispatcher.add_error_handler(error_handler)
         
         logger.info("🚀 Starting multi-file zip bot...")
