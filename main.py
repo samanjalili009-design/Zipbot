@@ -1,143 +1,129 @@
-import asyncio
 import os
+import logging
+import zipfile
 import tempfile
-from pathlib import Path
-import pyzipper
-from pyrogram import Client, filters
-from pyrogram.types import Message
-from asyncio import Queue
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# ===== API و SESSION =====
-API_ID = 1867911
-API_HASH = "f9e86b274826212a2712b18754fabc47"
-SESSION_NAME = "userbot_zip_session"
+# تنظیمات
+TOKEN = "8145993181:AAFK7PeFs_9VsHqaP3iKagj9lWTNJXKpgjk"
+ACCOUNT_HASH = "f9e86b274826212a2712b18754fabc47"
+ALLOWED_USER_ID = 1867911  # آیدی کاربر مجاز
 
-# ===== داده کاربر =====
-user_data = {
-    "password": None,
-    "files": [],
-    "download_queue": Queue()
-}
+# تنظیمات لاگ
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-CHUNK_SIZE = 4 * 1024 * 1024  # 4MB
-MAX_CONCURRENT_DOWNLOADS = 3  # تعداد همزمان دانلودها
-
-app = Client(SESSION_NAME, api_id=API_ID, api_hash=API_HASH)
-
-# ===== Helper =====
-def format_size(size_bytes: int) -> str:
-    if size_bytes == 0:
-        return "0 B"
-    size_names = ["B", "KB", "MB", "GB", "TB"]
-    i = 0
-    while size_bytes >= 1024 and i < len(size_names)-1:
-        size_bytes /= 1024.0
-        i += 1
-    return f"{size_bytes:.2f} {size_names[i]}"
-
-async def download_file(message: Message, file_path: Path):
-    file_size = message.document.file_size
-    downloaded = 0
-
-    async for chunk in message.download(file_name=None, in_memory=True):
-        with open(file_path, "ab") as f:
-            f.write(chunk)
-        downloaded += len(chunk)
-        progress = (downloaded / file_size) * 100
-        await message.edit_text(f"📥 دانلود '{message.document.file_name}': {format_size(downloaded)} / {format_size(file_size)} ({int(progress)}%)")
-    return file_path
-
-async def worker_download():
-    while True:
-        message, temp_path = await user_data["download_queue"].get()
-        try:
-            await download_file(message, temp_path)
-        except Exception as e:
-            await message.reply(f"❌ خطا در دانلود {message.document.file_name}: {e}")
-        finally:
-            user_data["download_queue"].task_done()
-
-# ===== Commands =====
-@app.on_message(filters.command("zip") & filters.me)
-async def start_zip(client: Client, message: Message):
-    user_data["password"] = None
-    user_data["files"] = []
-    await message.reply("🔐 لطفاً رمز عبور برای فایل زیپ وارد کنید (حداقل 6 کاراکتر):")
-
-@app.on_message(filters.text & filters.me)
-async def receive_password(client: Client, message: Message):
-    if user_data["password"] is not None:
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """دستور شروع"""
+    if update.effective_user.id != ALLOWED_USER_ID:
+        await update.message.reply_text("❌ دسترسی denied.")
         return
-    password = message.text.strip()
-    if len(password) < 6:
-        await message.reply("❌ رمز حداقل 6 کاراکتر باشد. دوباره وارد کنید:")
+    
+    await update.message.reply_text(
+        "🤖 ربات آماده است!\n\n"
+        "فایل‌ها را ارسال کنید و پس از اتمام، از دستور /zip استفاده کنید."
+    )
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """مدیریت دریافت فایل‌ها"""
+    if update.effective_user.id != ALLOWED_USER_ID:
         return
-    user_data["password"] = password
-    await message.reply(f"✅ رمز ذخیره شد: {password}\n📁 حالا فایل‌ها را ارسال کنید.")
+    
+    # ذخیره اطلاعات فایل در context
+    if 'files' not in context.user_data:
+        context.user_data['files'] = []
+    
+    document = update.message.document
+    context.user_data['files'].append({
+        'file_id': document.file_id,
+        'file_name': document.file_name,
+        'mime_type': document.mime_type
+    })
+    
+    await update.message.reply_text(f"✅ فایل '{document.file_name}' ذخیره شد.")
 
-@app.on_message(filters.document & filters.me)
-async def receive_file(client: Client, message: Message):
-    if user_data["password"] is None:
-        await message.reply("❌ ابتدا /zip را اجرا کنید و رمز وارد کنید.")
+async def zip_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """زیپ کردن فایل‌ها و ارسال"""
+    if update.effective_user.id != ALLOWED_USER_ID:
+        await update.message.reply_text("❌ دسترسی denied.")
         return
-
-    temp_dir = Path(tempfile.mkdtemp())
-    temp_file_path = temp_dir / message.document.file_name
-
-    await message.reply(f"📥 فایل '{message.document.file_name}' به صف دانلود اضافه شد...")
-    await user_data["download_queue"].put((message, temp_file_path))
-    user_data["files"].append(str(temp_file_path))
-
-@app.on_message(filters.command("done") & filters.me)
-async def done_zip(client: Client, message: Message):
-    if not user_data.get("files"):
-        await message.reply("❌ هیچ فایلی ارسال نشده است.")
+    
+    if 'files' not in context.user_data or not context.user_data['files']:
+        await update.message.reply_text("❌ هیچ فایلی برای زیپ کردن وجود ندارد.")
         return
-
-    # ===== شروع دانلود همزمان =====
-    workers = [asyncio.create_task(worker_download()) for _ in range(MAX_CONCURRENT_DOWNLOADS)]
-    await user_data["download_queue"].join()
-    for w in workers:
-        w.cancel()
-
-    # ===== ایجاد زیپ =====
-    zip_temp_dir = Path(tempfile.mkdtemp())
-    zip_file_path = zip_temp_dir / "archive.zip"
-
-    msg = await message.reply("📦 شروع ایجاد فایل زیپ...")
-    with pyzipper.AESZipFile(zip_file_path, 'w', compression=pyzipper.ZIP_DEFLATED, encryption=pyzipper.WZ_AES) as zf:
-        zf.setpassword(user_data["password"].encode("utf-8"))
-        for file_path in user_data["files"]:
-            zf.write(file_path, Path(file_path).name)
-
-    zip_size = os.path.getsize(zip_file_path)
-    await msg.edit_text(f"✅ فایل زیپ ایجاد شد!\n📦 حجم: {format_size(zip_size)}\n🔐 رمز: {user_data['password']}")
-
-    # ===== آپلود زیپ =====
-    await message.reply("⬆️ شروع آپلود فایل زیپ...")
-    await client.send_document(message.chat.id, zip_file_path)
-
-    # ===== پاکسازی =====
-    for file_path in user_data["files"]:
-        try:
-            file_path_obj = Path(file_path)
-            if file_path_obj.exists():
-                file_path_obj.unlink()
-            if file_path_obj.parent.exists():
-                file_path_obj.parent.rmdir()
-        except:
-            pass
-
+    
     try:
-        if zip_file_path.exists():
-            zip_file_path.unlink()
-        if zip_temp_dir.exists():
-            zip_temp_dir.rmdir()
-    except:
-        pass
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            zip_path = os.path.join(tmp_dir, "archive.zip")
+            
+            # دانلود و زیپ کردن فایل‌ها
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for file_info in context.user_data['files']:
+                    file = await context.bot.get_file(file_info['file_id'])
+                    file_download_path = os.path.join(tmp_dir, file_info['file_name'])
+                    await file.download_to_drive(file_download_path)
+                    zipf.write(file_download_path, file_info['file_name'])
+            
+            # ارسال فایل زیپ شده
+            with open(zip_path, 'rb') as zip_file:
+                await update.message.reply_document(
+                    document=zip_file,
+                    caption="📦 فایل‌های شما زیپ شدند!",
+                    filename="archive.zip"
+                )
+            
+            # پاک کردن لیست فایل‌ها
+            context.user_data['files'] = []
+            
+    except Exception as e:
+        logger.error(f"Error in zip_files: {e}")
+        await update.message.reply_text("❌ خطایی در پردازش فایل‌ها رخ داد.")
 
-    user_data.clear()
-    await message.reply("♻️ فایل‌های موقت پاک شدند و عملیات تمام شد.")
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """پاک کردن فایل‌های ذخیره شده"""
+    if update.effective_user.id != ALLOWED_USER_ID:
+        return
+    
+    if 'files' in context.user_data:
+        context.user_data['files'] = []
+    
+    await update.message.reply_text("✅ فایل‌های ذخیره شده پاک شدند.")
 
-# ===== اجرا =====
-app.run()
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """راهنما"""
+    if update.effective_user.id != ALLOWED_USER_ID:
+        return
+    
+    help_text = """
+📖 راهنمای ربات:
+
+1. فایل‌های خود را ارسال کنید
+2. پس از اتمام از دستور /zip استفاده کنید
+3. فایل زیپ شده دریافت خواهد شد
+4. برای پاک کردن فایل‌های ذخیره شده از /cancel استفاده کنید
+
+💡 توجه: فایل‌ها پس از هر بار زیپ کردن به طور خودکار پاک می‌شوند.
+"""
+    await update.message.reply_text(help_text)
+
+def main():
+    """اجرای اصلی ربات"""
+    # ایجاد اپلیکیشن
+    application = Application.builder().token(TOKEN).build()
+    
+    # اضافه کردن handlerها
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("zip", zip_files))
+    application.add_handler(CommandHandler("cancel", cancel))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    
+    # شروع ربات
+    application.run_polling()
+
+if __name__ == "__main__":
+    main()
