@@ -5,6 +5,7 @@ from pathlib import Path
 import pyzipper
 from pyrogram import Client, filters
 from pyrogram.types import Message
+from asyncio import Queue
 
 # ===== API و SESSION =====
 API_ID = 1867911
@@ -14,8 +15,12 @@ SESSION_NAME = "userbot_zip_session"
 # ===== داده کاربر =====
 user_data = {
     "password": None,
-    "files": []
+    "files": [],
+    "download_queue": Queue()
 }
+
+CHUNK_SIZE = 4 * 1024 * 1024  # 4MB
+MAX_CONCURRENT_DOWNLOADS = 3  # تعداد همزمان دانلودها
 
 app = Client(SESSION_NAME, api_id=API_ID, api_hash=API_HASH)
 
@@ -29,6 +34,28 @@ def format_size(size_bytes: int) -> str:
         size_bytes /= 1024.0
         i += 1
     return f"{size_bytes:.2f} {size_names[i]}"
+
+async def download_file(message: Message, file_path: Path):
+    file_size = message.document.file_size
+    downloaded = 0
+
+    async for chunk in message.download(file_name=None, in_memory=True):
+        with open(file_path, "ab") as f:
+            f.write(chunk)
+        downloaded += len(chunk)
+        progress = (downloaded / file_size) * 100
+        await message.edit_text(f"📥 دانلود '{message.document.file_name}': {format_size(downloaded)} / {format_size(file_size)} ({int(progress)}%)")
+    return file_path
+
+async def worker_download():
+    while True:
+        message, temp_path = await user_data["download_queue"].get()
+        try:
+            await download_file(message, temp_path)
+        except Exception as e:
+            await message.reply(f"❌ خطا در دانلود {message.document.file_name}: {e}")
+        finally:
+            user_data["download_queue"].task_done()
 
 # ===== Commands =====
 @app.on_message(filters.command("zip") & filters.me)
@@ -57,10 +84,8 @@ async def receive_file(client: Client, message: Message):
     temp_dir = Path(tempfile.mkdtemp())
     temp_file_path = temp_dir / message.document.file_name
 
-    await message.reply(f"📥 دانلود فایل '{message.document.file_name}'...")
-    await message.download(file_name=temp_file_path)
-    await message.reply(f"✅ فایل '{message.document.file_name}' دانلود شد.")
-
+    await message.reply(f"📥 فایل '{message.document.file_name}' به صف دانلود اضافه شد...")
+    await user_data["download_queue"].put((message, temp_file_path))
     user_data["files"].append(str(temp_file_path))
 
 @app.on_message(filters.command("done") & filters.me)
@@ -69,6 +94,13 @@ async def done_zip(client: Client, message: Message):
         await message.reply("❌ هیچ فایلی ارسال نشده است.")
         return
 
+    # ===== شروع دانلود همزمان =====
+    workers = [asyncio.create_task(worker_download()) for _ in range(MAX_CONCURRENT_DOWNLOADS)]
+    await user_data["download_queue"].join()
+    for w in workers:
+        w.cancel()
+
+    # ===== ایجاد زیپ =====
     zip_temp_dir = Path(tempfile.mkdtemp())
     zip_file_path = zip_temp_dir / "archive.zip"
 
@@ -81,6 +113,7 @@ async def done_zip(client: Client, message: Message):
     zip_size = os.path.getsize(zip_file_path)
     await msg.edit_text(f"✅ فایل زیپ ایجاد شد!\n📦 حجم: {format_size(zip_size)}\n🔐 رمز: {user_data['password']}")
 
+    # ===== آپلود زیپ =====
     await message.reply("⬆️ شروع آپلود فایل زیپ...")
     await client.send_document(message.chat.id, zip_file_path)
 
