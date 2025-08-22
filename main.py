@@ -19,8 +19,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHANNEL_USERNAME = "@your_channel_username"
-CHANNEL_ID = -1001234567890
+CHANNEL_USERNAME = "@flvst1"
+CHANNEL_ID = -1001093039800
 
 # محدودیت‌های پیشرفته
 MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2 گیگابایت برای هر فایل
