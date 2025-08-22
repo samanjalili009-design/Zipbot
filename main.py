@@ -5,6 +5,7 @@ from telegram import Update, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, ConversationHandler
 import logging
 from typing import Dict
+import asyncio
 
 # تنظیمات لاگ
 logging.basicConfig(
@@ -68,23 +69,28 @@ async def receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("حداکثر تعداد فایل‌ها (10) رسیده است. لطفاً /done را ارسال کنید.")
         return WAITING_FILES
     
-    document = update.message.document
-    file = await document.get_file()
-    
-    # ایجاد پوشه موقت برای ذخیره فایل
-    with tempfile.NamedTemporaryFile(delete=False) as temp_file:
-        await file.download_to_drive(temp_file.name)
-        user_data[user_id]['files'].append({
-            'name': document.file_name,
-            'path': temp_file.name
-        })
-    
-    remaining = 10 - len(user_data[user_id]['files'])
-    await update.message.reply_text(
-        f"فایل '{document.file_name}' دریافت شد. ({remaining} فایل دیگر قابل دریافت است)\n"
-        "فایل بعدی را ارسال کنید یا برای اتمام /done را ارسال کنید."
-    )
-    return WAITING_FILES
+    try:
+        document = update.message.document
+        file = await document.get_file()
+        
+        # ایجاد پوشه موقت برای ذخیره فایل
+        with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+            await file.download_to_drive(temp_file.name)
+            user_data[user_id]['files'].append({
+                'name': document.file_name,
+                'path': temp_file.name
+            })
+        
+        remaining = 10 - len(user_data[user_id]['files'])
+        await update.message.reply_text(
+            f"فایل '{document.file_name}' دریافت شد. ({remaining} فایل دیگر قابل دریافت است)\n"
+            "فایل بعدی را ارسال کنید یا برای اتمام /done را ارسال کنید."
+        )
+        return WAITING_FILES
+    except Exception as e:
+        logger.error(f"Error receiving file: {e}")
+        await update.message.reply_text("خطا در دریافت فایل. لطفاً دوباره امتحان کنید.")
+        return WAITING_FILES
 
 async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -93,42 +99,50 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("هیچ فایلی دریافت نشده است. لطفاً ابتدا فایل‌ها را ارسال کنید.")
         return ConversationHandler.END
     
-    await update.message.reply_text("در حال ایجاد فایل زیپ... لطفاً منتظر بمانید.")
-    
-    # ایجاد فایل زیپ رمزدار
-    with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as zip_file:
-        with pyzipper.AESZipFile(
-            zip_file.name, 
-            'w', 
-            compression=pyzipper.ZIP_DEFLATED,
-            encryption=pyzipper.WZ_AES
-        ) as zf:
-            zf.setpassword(user_data[user_id]['password'].encode('utf-8'))
-            
-            for file_info in user_data[user_id]['files']:
-                zf.write(file_info['path'], file_info['name'])
+    try:
+        await update.message.reply_text("در حال ایجاد فایل زیپ... لطفاً منتظر بمانید.")
         
-        # ارسال فایل زیپ
-        zip_file.seek(0)
-        await update.message.reply_document(
-            document=InputFile(zip_file, filename='archive.zip'),
-            caption=f"فایل زیپ با رمز '{user_data[user_id]['password']}' ایجاد شد."
-        )
-    
-    # پاکسازی فایل‌های موقت
-    for file_info in user_data[user_id]['files']:
+        # ایجاد فایل زیپ رمزدار
+        with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as zip_file:
+            with pyzipper.AESZipFile(
+                zip_file.name, 
+                'w', 
+                compression=pyzipper.ZIP_DEFLATED,
+                encryption=pyzipper.WZ_AES
+            ) as zf:
+                zf.setpassword(user_data[user_id]['password'].encode('utf-8'))
+                
+                for file_info in user_data[user_id]['files']:
+                    zf.write(file_info['path'], file_info['name'])
+            
+            # ارسال فایل زیپ
+            zip_file.seek(0)
+            await update.message.reply_document(
+                document=InputFile(zip_file, filename='archive.zip'),
+                caption=f"فایل زیپ با رمز '{user_data[user_id]['password']}' ایجاد شد."
+            )
+        
+        # پاکسازی فایل‌های موقت
+        for file_info in user_data[user_id]['files']:
+            try:
+                os.unlink(file_info['path'])
+            except:
+                pass
         try:
-            os.unlink(file_info['path'])
+            os.unlink(zip_file.name)
         except:
             pass
-    try:
-        os.unlink(zip_file.name)
-    except:
-        pass
+        
+        await update.message.reply_text("✅ فایل زیپ با موفقیت ایجاد و ارسال شد!")
+        
+    except Exception as e:
+        logger.error(f"Error creating zip: {e}")
+        await update.message.reply_text("❌ خطا در ایجاد فایل زیپ. لطفاً دوباره امتحان کنید.")
     
-    # پاکسازی داده کاربر
-    if user_id in user_data:
-        del user_data[user_id]
+    finally:
+        # پاکسازی داده کاربر
+        if user_id in user_data:
+            del user_data[user_id]
     
     return ConversationHandler.END
 
@@ -149,34 +163,41 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Error: {context.error}")
+    if update and update.message:
+        await update.message.reply_text("❌ خطایی رخ داده است. لطفاً دوباره امتحان کنید.")
 
 def main():
     if not BOT_TOKEN:
+        logger.error("BOT_TOKEN environment variable is required")
         raise ValueError("BOT_TOKEN environment variable is required")
     
-    # استفاده از Application بدون Updater
-    application = Application.builder().token(BOT_TOKEN).build()
-    
-    # handlers
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('zip', zip_command)],
-        states={
-            WAITING_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_password)],
-            WAITING_FILES: [
-                MessageHandler(filters.Document.ALL, receive_file),
-                CommandHandler('done', done_command)
-            ],
-        },
-        fallbacks=[CommandHandler('cancel', cancel)],
-    )
-    
-    application.add_handler(CommandHandler('start', start))
-    application.add_handler(conv_handler)
-    application.add_error_handler(error_handler)
-    
-    # راه‌اندازی بات
-    print("Bot is starting...")
-    application.run_polling()
+    try:
+        application = Application.builder().token(BOT_TOKEN).build()
+        
+        # handlers
+        conv_handler = ConversationHandler(
+            entry_points=[CommandHandler('zip', zip_command)],
+            states={
+                WAITING_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_password)],
+                WAITING_FILES: [
+                    MessageHandler(filters.Document.ALL, receive_file),
+                    CommandHandler('done', done_command)
+                ],
+            },
+            fallbacks=[CommandHandler('cancel', cancel)],
+        )
+        
+        application.add_handler(CommandHandler('start', start))
+        application.add_handler(conv_handler)
+        application.add_error_handler(error_handler)
+        
+        logger.info("Bot is starting...")
+        print("🤖 Bot is starting...")
+        application.run_polling()
+        
+    except Exception as e:
+        logger.error(f"Failed to start bot: {e}")
+        print(f"❌ Failed to start bot: {e}")
 
 if __name__ == "__main__":
     main()
