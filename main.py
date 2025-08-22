@@ -5,7 +5,11 @@ import pyzipper
 from telegram import Update, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # از محیط Render ست کن
+# ✅ اینجا اسم متغیر محیطی رو می‌نویسیم، نه خود توکن
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+if not BOT_TOKEN:
+    raise RuntimeError("❌ BOT_TOKEN تعریف نشده! لطفاً در Render → Environment Variables مقداردهی کن.")
 
 HELP_TEXT = """
 سلام 👋
