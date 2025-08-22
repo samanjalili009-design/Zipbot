@@ -1,7 +1,8 @@
 import os
-import tempfile
+import io
 import aiohttp
 import pyzipper
+import asyncio
 from telegram import Update, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
@@ -10,6 +11,7 @@ if not BOT_TOKEN:
     raise RuntimeError("❌ BOT_TOKEN تعریف نشده! لطفاً در Render → Environment Variables اضافه کن.")
 
 MAX_FILE_SIZE = 512 * 1024 * 1024  # 512 MB
+CHUNK_SIZE = 1 * 1024 * 1024  # 1MB chunks
 
 HELP_TEXT = """
 سلام 👋
@@ -50,44 +52,61 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await msg.reply_text("⬇️ دارم دانلود می‌کنم...")
 
-    async with aiohttp.ClientSession() as session:
-        async with session.get(link) as resp:
-            if resp.status != 200:
-                return await msg.reply_text(f"❌ دانلود موفق نبود! Status code: {resp.status}")
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(link) as resp:
+                if resp.status != 200:
+                    return await msg.reply_text(f"❌ دانلود موفق نبود! Status code: {resp.status}")
 
-            total = int(resp.headers.get("Content-Length", 0))
-            if total > MAX_FILE_SIZE:
-                return await msg.reply_text(f"❌ حجم فایل بیش از 512MB است ({total / (1024*1024):.1f} MB)")
+                total = int(resp.headers.get("Content-Length", 0))
+                if total > MAX_FILE_SIZE:
+                    return await msg.reply_text(f"❌ حجم فایل بیش از 512MB است ({total / (1024*1024):.1f} MB)")
 
-            with tempfile.TemporaryDirectory() as td:
-                orig_path = os.path.join(td, "input_file")
-                zip_path = os.path.join(td, "file.zip")
+                # دانلود به memory
+                file_data = bytearray()
+                downloaded = 0
+                
+                async for chunk in resp.content.iter_chunked(CHUNK_SIZE):
+                    file_data.extend(chunk)
+                    downloaded += len(chunk)
+                    
+                    # بررسی حجم برای جلوگیری از مصرف بیش از حد memory
+                    if downloaded > MAX_FILE_SIZE:
+                        return await msg.reply_text("❌ حجم فایل بیش از حد مجاز است")
 
-                # دانلود chunk به chunk
-                with open(orig_path, "wb") as f:
-                    async for chunk in resp.content.iter_chunked(1024*1024):
-                        f.write(chunk)
+                await msg.reply_text("🔐 دارم فایل رو رمزگذاری می‌کنم...")
 
-                # ساخت زیپ رمزدار
-                with pyzipper.AESZipFile(zip_path, 'w',
-                                         compression=pyzipper.ZIP_DEFLATED,
-                                         encryption=pyzipper.WZ_AES) as zf:
+                # ایجاد زیپ در memory
+                zip_buffer = io.BytesIO()
+                
+                with pyzipper.AESZipFile(zip_buffer, 'w',
+                                       compression=pyzipper.ZIP_DEFLATED,
+                                       encryption=pyzipper.WZ_AES) as zf:
                     zf.setpassword(pwd.encode("utf-8"))
-                    zf.write(orig_path, "file")
+                    zf.writestr("file", bytes(file_data))
 
-                size_mb = os.path.getsize(zip_path) / (1024*1024)
-                await msg.reply_text(f"✅ فشرده شد ({size_mb:.1f} MB). دارم می‌فرستم...")
+                zip_size = len(zip_buffer.getvalue())
+                await msg.reply_text(f"✅ فشرده شد ({zip_size / (1024*1024):.1f} MB). دارم می‌فرستم...")
 
+                # ارسال فایل
+                zip_buffer.seek(0)
                 await msg.reply_document(
-                    document=InputFile(zip_path, filename="file.zip"),
+                    document=InputFile(zip_buffer, filename="file.zip"),
                     caption="📦 زیپ رمزدار آماده شد."
                 )
+
+    except aiohttp.ClientError as e:
+        await msg.reply_text(f"❌ خطا در دانلود: {str(e)}")
+    except Exception as e:
+        await msg.reply_text(f"❌ خطای غیرمنتظره: {str(e)}")
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
-    app.run_polling()  # بدون asyncio.run()
+    
+    print("🤖 ربات در حال اجرا است...")
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
