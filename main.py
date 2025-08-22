@@ -2,10 +2,9 @@ import os
 import tempfile
 import pyzipper
 from telegram import Update, InputFile
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
 import logging
-import asyncio
-from datetime import datetime
+import shutil
 
 # تنظیمات لاگ
 logging.basicConfig(
@@ -68,7 +67,6 @@ class UserSession:
     def cleanup(self):
         """پاک کردن فایل‌های موقت"""
         try:
-            import shutil
             shutil.rmtree(self.temp_dir, ignore_errors=True)
         except:
             pass
@@ -79,17 +77,17 @@ def get_user_session(user_id):
         user_data[user_id] = UserSession(user_id)
     return user_data[user_id]
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(HELP_TEXT)
+def start(update: Update, context: CallbackContext):
+    update.message.reply_text(HELP_TEXT)
 
-async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def on_document(update: Update, context: CallbackContext):
     try:
         msg = update.message
         user_id = msg.from_user.id
         session = get_user_session(user_id)
         
         if session.step != 'waiting_for_files':
-            await msg.reply_text("❌ لطفاً ابتدا عملیات قبلی را کامل کنید یا /cancel بزنید")
+            msg.reply_text("❌ لطفاً ابتدا عملیات قبلی را کامل کنید یا /cancel بزنید")
             return
         
         doc = msg.document
@@ -98,7 +96,7 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # افزودن فایل به session
         success, message = session.add_file(doc.file_id, file_name, file_size)
-        await msg.reply_text(message)
+        msg.reply_text(message)
         
         if success:
             status_text = (
@@ -107,26 +105,26 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"💾 حجم کل: {session.total_size//1024//1024}MB\n\n"
                 f"📌 فایل بعدی را ارسال کنید یا /done بزنید"
             )
-            await msg.reply_text(status_text)
+            msg.reply_text(status_text)
                 
     except Exception as e:
         logger.error(f"Error: {str(e)}")
-        await msg.reply_text("❌ خطایی رخ داد. لطفاً دوباره تلاش کنید.")
+        msg.reply_text("❌ خطایی رخ داد. لطفاً دوباره تلاش کنید.")
 
-async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def done_command(update: Update, context: CallbackContext):
     """اتمام آپلود فایل‌ها"""
     try:
         msg = update.message
         user_id = msg.from_user.id
         
         if user_id not in user_data:
-            await msg.reply_text("❌ هیچ فایلی ارسال نکرده‌اید")
+            msg.reply_text("❌ هیچ فایلی ارسال نکرده‌اید")
             return
         
         session = user_data[user_id]
         
         if len(session.files) == 0:
-            await msg.reply_text("❌ هیچ فایلی ارسال نکرده‌اید")
+            msg.reply_text("❌ هیچ فایلی ارسال نکرده‌اید")
             return
         
         session.step = 'waiting_for_password'
@@ -137,13 +135,13 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💾 حجم کل: {session.total_size//1024//1024}MB\n\n"
             f"🔐 لطفاً رمز مورد نظر را ارسال کنید:"
         )
-        await msg.reply_text(status_text)
+        msg.reply_text(status_text)
         
     except Exception as e:
         logger.error(f"Done error: {e}")
-        await msg.reply_text("❌ خطایی رخ داد")
+        msg.reply_text("❌ خطایی رخ داد")
 
-async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def cancel_command(update: Update, context: CallbackContext):
     """لغو عملیات"""
     try:
         msg = update.message
@@ -153,13 +151,13 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_data[user_id].cleanup()
             del user_data[user_id]
         
-        await msg.reply_text("✅ عملیات لغو شد")
+        msg.reply_text("✅ عملیات لغو شد")
         
     except Exception as e:
         logger.error(f"Cancel error: {e}")
-        await msg.reply_text("❌ خطایی رخ داد")
+        msg.reply_text("❌ خطایی رخ داد")
 
-async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def on_text(update: Update, context: CallbackContext):
     """پردازش رمز ارسالی کاربر"""
     try:
         msg = update.message
@@ -167,37 +165,37 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = msg.text.strip()
         
         if user_id not in user_data:
-            await msg.reply_text("❌ لطفاً ابتدا فایل‌ها را ارسال کنید")
+            msg.reply_text("❌ لطفاً ابتدا فایل‌ها را ارسال کنید")
             return
         
         session = user_data[user_id]
         
         if session.step != 'waiting_for_password':
-            await msg.reply_text("❌ لطفاً ابتدا فایل‌ها را ارسال و /done کنید")
+            msg.reply_text("❌ لطفاً ابتدا فایل‌ها را ارسال و /done کنید")
             return
         
         if not text:
-            await msg.reply_text("❌ رمز نمی‌تواند خالی باشد")
+            msg.reply_text("❌ رمز نمی‌تواند خالی باشد")
             return
         
         # شروع پردازش
-        await msg.reply_text("⏳ در حال پردازش فایل‌ها...")
-        await process_files(user_id, msg, text)
+        msg.reply_text("⏳ در حال پردازش فایل‌ها...")
+        context.dispatcher.run_async(process_files, user_id, msg, text)
         
     except Exception as e:
         logger.error(f"Text processing error: {e}")
-        await msg.reply_text("❌ خطایی رخ داد. لطفاً دوباره تلاش کنید.")
+        msg.reply_text("❌ خطایی رخ داد. لطفاً دوباره تلاش کنید.")
 
-async def process_files(user_id, message, password):
+def process_files(user_id, message, password):
     """پردازش همه فایل‌ها و ایجاد زیپ"""
     try:
         if user_id not in user_data:
-            await message.reply_text("❌ اطلاعات فایل‌ها یافت نشد")
+            message.reply_text("❌ اطلاعات فایل‌ها یافت نشد")
             return
         
         session = user_data[user_id]
         
-        await message.reply_text("⬇️ در حال دانلود فایل‌ها...")
+        message.reply_text("⬇️ در حال دانلود فایل‌ها...")
         
         # دانلود همه فایل‌ها
         downloaded_files = []
@@ -205,27 +203,28 @@ async def process_files(user_id, message, password):
             try:
                 file_path = os.path.join(session.temp_dir, file_info['file_name'])
                 
-                file = await message._bot.get_file(file_info['file_id'])
-                await file.download_to_drive(file_path)
+                file = message.bot.get_file(file_info['file_id'])
+                file.download(file_path)
                 
                 if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
                     downloaded_files.append(file_path)
                     progress = f"✅ دانلود فایل {i+1} از {len(session.files)}"
-                    await message.reply_text(progress)
+                    message.reply_text(progress)
                 else:
-                    await message.reply_text(f"❌ خطا در دانلود فایل {file_info['file_name']}")
+                    message.reply_text(f"❌ خطا در دانلود فایل {file_info['file_name']}")
                     
             except Exception as e:
                 logger.error(f"Download error for {file_info['file_name']}: {e}")
-                await message.reply_text(f"❌ خطا در دانلود فایل {file_info['file_name']}")
+                message.reply_text(f"❌ خطا در دانلود فایل {file_info['file_name']}")
         
         if not downloaded_files:
-            await message.reply_text("❌ هیچ فایلی دانلود نشد")
+            message.reply_text("❌ هیچ فایلی دانلود نشد")
             return
         
-        await message.reply_text("🔒 در حال ایجاد فایل زیپ رمزدار...")
+        message.reply_text("🔒 در حال ایجاد فایل زیپ رمزدار...")
         
         # ایجاد فایل زیپ
+        from datetime import datetime
         zip_name = f"archive_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
         zip_path = os.path.join(session.temp_dir, zip_name)
         
@@ -243,21 +242,21 @@ async def process_files(user_id, message, password):
                     
         except Exception as e:
             logger.error(f"Zip error: {e}")
-            await message.reply_text("❌ خطا در ایجاد فایل زیپ")
+            message.reply_text("❌ خطا در ایجاد فایل زیپ")
             return
         
         if not os.path.exists(zip_path) or os.path.getsize(zip_path) == 0:
-            await message.reply_text("❌ فایل زیپ ایجاد نشد")
+            message.reply_text("❌ فایل زیپ ایجاد نشد")
             return
         
         zip_size = os.path.getsize(zip_path)
         size_mb = zip_size / (1024 * 1024)
         
         # ارسال فایل زیپ
-        await message.reply_text(f"✅ فایل زیپ ایجاد شد ({size_mb:.1f} MB)")
+        message.reply_text(f"✅ فایل زیپ ایجاد شد ({size_mb:.1f} MB)")
         
         with open(zip_path, 'rb') as f:
-            await message.reply_document(
+            message.reply_document(
                 document=InputFile(f, filename=zip_name),
                 caption=(
                     f"📦 فایل زیپ رمزدار\n"
@@ -267,7 +266,7 @@ async def process_files(user_id, message, password):
                 )
             )
         
-        await message.reply_text("🎉 عملیات با موفقیت完成 شد!")
+        message.reply_text("🎉 عملیات با موفقیت完成 شد!")
         
         # پاکسازی
         session.cleanup()
@@ -276,14 +275,14 @@ async def process_files(user_id, message, password):
             
     except Exception as e:
         logger.error(f"Process error: {e}")
-        await message.reply_text("❌ خطایی در پردازش فایل‌ها رخ داد")
+        message.reply_text("❌ خطایی در پردازش فایل‌ها رخ داد")
         
         # پاکسازی در صورت خطا
         if user_id in user_data:
             user_data[user_id].cleanup()
             del user_data[user_id]
 
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def error_handler(update: Update, context: CallbackContext):
     logger.error(f"Error: {context.error}")
 
 def main():
@@ -291,18 +290,21 @@ def main():
         raise ValueError("BOT_TOKEN environment variable is required")
     
     try:
-        application = Application.builder().token(BOT_TOKEN).build()
+        # استفاده از Updater به جای Application
+        updater = Updater(token=BOT_TOKEN, use_context=True)
+        dispatcher = updater.dispatcher
         
         # اضافه کردن handlerها
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CommandHandler("done", done_command))
-        application.add_handler(CommandHandler("cancel", cancel_command))
-        application.add_handler(MessageHandler(filters.Document.ALL, on_document))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
-        application.add_error_handler(error_handler)
+        dispatcher.add_handler(CommandHandler("start", start))
+        dispatcher.add_handler(CommandHandler("done", done_command))
+        dispatcher.add_handler(CommandHandler("cancel", cancel_command))
+        dispatcher.add_handler(MessageHandler(Filters.document, on_document))
+        dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, on_text))
+        dispatcher.add_error_handler(error_handler)
         
         logger.info("🚀 Starting multi-file zip bot...")
-        application.run_polling()
+        updater.start_polling()
+        updater.idle()
         
     except Exception as e:
         logger.error(f"Failed to start bot: {e}")
