@@ -3,8 +3,9 @@ import io
 import aiohttp
 import pyzipper
 import logging
-from telegram import Update, InputFile
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+from telegram import Update
+from telegram.ext import Updater, CommandHandler, MessageHandler, CallbackContext
+from telegram.ext import filters
 
 # تنظیمات logging
 logging.basicConfig(
@@ -46,19 +47,7 @@ def parse_link(text):
 def start(update: Update, context: CallbackContext):
     update.message.reply_text(HELP_TEXT)
 
-async def on_text(update: Update, context: CallbackContext):
-    msg = update.message
-    text = msg.text
-    pwd = parse_password(text)
-    link = parse_link(text)
-
-    if not pwd:
-        return await msg.reply_text("❌ رمز پیدا نشد. در پیام بنویس: pass=1234")
-    if not link:
-        return await msg.reply_text("❌ لینک فایل پیدا نشد. لینک مستقیم بده.")
-
-    await msg.reply_text("⬇️ دارم دانلود می‌کنم...")
-
+async def download_and_process_file(link, pwd, msg):
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(link) as resp:
@@ -97,12 +86,36 @@ async def on_text(update: Update, context: CallbackContext):
                 # ارسال فایل
                 zip_buffer.seek(0)
                 await msg.reply_document(
-                    document=InputFile(zip_buffer, filename="file.zip"),
+                    document=zip_buffer,
+                    filename="file.zip",
                     caption="📦 زیپ رمزدار آماده شد."
                 )
+                return True
 
     except Exception as e:
         await msg.reply_text(f"❌ خطا: {str(e)}")
+        return False
+
+def on_text(update: Update, context: CallbackContext):
+    msg = update.message
+    text = msg.text
+    pwd = parse_password(text)
+    link = parse_link(text)
+
+    if not pwd:
+        msg.reply_text("❌ رمز پیدا نشد. در پیام بنویس: pass=1234")
+        return
+    if not link:
+        msg.reply_text("❌ لینک فایل پیدا نشد. لینک مستقیم بده.")
+        return
+
+    msg.reply_text("⬇️ دارم دانلود می‌کنم...")
+    
+    # اجرای عملیات دانلود به صورت async
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    result = loop.run_until_complete(download_and_process_file(link, pwd, msg))
+    loop.close()
 
 def main():
     try:
@@ -110,7 +123,7 @@ def main():
         dp = updater.dispatcher
         
         dp.add_handler(CommandHandler("start", start))
-        dp.add_handler(MessageHandler(Filters.text & ~Filters.command, on_text))
+        dp.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
         
         print("🤖 ربات در حال اجرا است...")
         updater.start_polling()
