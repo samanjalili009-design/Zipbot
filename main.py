@@ -4,6 +4,7 @@ import pyzipper
 from telegram import Update, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 import logging
+import math
 
 # تنظیمات لاگ
 logging.basicConfig(
@@ -13,6 +14,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+MAX_FILE_SIZE = 500 * 1024 * 1024  # 500MB
+TELEGRAM_LIMIT = 50 * 1024 * 1024  # 50MB (محدودیت تلگرام)
 
 HELP_TEXT = """
 سلام 👋
@@ -20,13 +23,14 @@ HELP_TEXT = """
 /zip pass=رمزتو
 مثال:
 /zip pass=1234
+
+⚠️ حداکثر حجم فایل: 500 مگابایت
 """
 
 def parse_password(caption: str | None) -> str | None:
     if not caption:
         return None
     
-    # بررسی چندین فرمت مختلف
     patterns = ["pass=", "password=", "رمز=", "پسورد="]
     caption_lower = caption.lower()
     
@@ -38,6 +42,56 @@ def parse_password(caption: str | None) -> str | None:
                     return part.split("=", 1)[1]
     
     return None
+
+async def split_large_file(file_path, chunk_size=TELEGRAM_LIMIT):
+    """تقسیم فایل بزرگ به چند قسمت"""
+    chunks = []
+    file_name = os.path.basename(file_path)
+    
+    with open(file_path, 'rb') as f:
+        chunk_number = 1
+        while True:
+            chunk_data = f.read(chunk_size)
+            if not chunk_data:
+                break
+            
+            chunk_filename = f"{file_name}.part{chunk_number:03d}"
+            chunk_path = os.path.join(os.path.dirname(file_path), chunk_filename)
+            
+            with open(chunk_path, 'wb') as chunk_file:
+                chunk_file.write(chunk_data)
+            
+            chunks.append(chunk_path)
+            chunk_number += 1
+    
+    return chunks
+
+async def send_file_chunks(message, file_path, caption=""):
+    """ارسال فایل به صورت چندتایی اگر بزرگ باشد"""
+    file_size = os.path.getsize(file_path)
+    
+    if file_size <= TELEGRAM_LIMIT:
+        # فایل کوچک است، ارسال عادی
+        with open(file_path, 'rb') as f:
+            await message.reply_document(
+                document=InputFile(f, filename=os.path.basename(file_path)),
+                caption=caption
+            )
+    else:
+        # فایل بزرگ است، تقسیم به چند قسمت
+        chunks = await split_large_file(file_path)
+        total_chunks = len(chunks)
+        
+        await message.reply_text(f"📦 فایل به {total_chunks} قسمت تقسیم شد. در حال ارسال...")
+        
+        for i, chunk_path in enumerate(chunks, 1):
+            with open(chunk_path, 'rb') as f:
+                await message.reply_document(
+                    document=InputFile(f, filename=os.path.basename(chunk_path)),
+                    caption=f"{caption}\n📁 قسمت {i} از {total_chunks}"
+                )
+            # حذف فایل موقت بعد از ارسال
+            os.unlink(chunk_path)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(HELP_TEXT)
@@ -52,6 +106,11 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         doc = msg.document
         file_name = doc.file_name or "file"
+        file_size = doc.file_size or 0
+        
+        # بررسی حجم فایل
+        if file_size > MAX_FILE_SIZE:
+            return await msg.reply_text(f"❌ حجم فایل بیشتر از {MAX_FILE_SIZE//1024//1024}MB است")
         
         await msg.reply_text("⬇️ در حال دانلود فایل...")
 
@@ -87,20 +146,18 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not os.path.exists(zip_path):
                 return await msg.reply_text("❌ خطا در ایجاد فایل زیپ")
 
-            # ارسال فایل زیپ
-            file_size = os.path.getsize(zip_path)
-            size_mb = file_size / (1024 * 1024)
+            # بررسی حجم فایل زیپ
+            zip_size = os.path.getsize(zip_path)
+            size_mb = zip_size / (1024 * 1024)
             
-            if file_size > 50 * 1024 * 1024:  # 50MB limit
-                return await msg.reply_text("❌ حجم فایل زیپ بیشتر از 50MB است")
+            if zip_size > MAX_FILE_SIZE:
+                return await msg.reply_text("❌ حجم فایل زیپ بیش از حد مجاز است")
 
             await msg.reply_text(f"✅ فایل رمزگذاری شد ({size_mb:.1f} MB). در حال ارسال...")
             
-            with open(zip_path, 'rb') as f:
-                await msg.reply_document(
-                    document=InputFile(f, filename=zip_name),
-                    caption=f"📦 فایل زیپ رمزدار آماده شد\n🔐 رمز: {pwd}"
-                )
+            # ارسال فایل (به صورت چندتایی اگر بزرگ باشد)
+            caption = f"📦 فایل زیپ رمزدار آماده شد\n🔐 رمز: {pwd}\n📊 حجم: {size_mb:.1f}MB"
+            await send_file_chunks(msg, zip_path, caption)
 
     except Exception as e:
         logger.error(f"Error: {e}")
