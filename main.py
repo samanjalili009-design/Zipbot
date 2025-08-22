@@ -4,8 +4,7 @@ import pyzipper
 from telegram import Update, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, ConversationHandler
 import logging
-import asyncio
-from typing import Dict, List
+from typing import Dict
 
 # تنظیمات لاگ
 logging.basicConfig(
@@ -18,8 +17,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 # حالت‌های گفتگو
 WAITING_PASSWORD, WAITING_FILES = range(2)
-
-# ذخیره داده‌های کاربران
 user_data: Dict[int, Dict] = {}
 
 HELP_TEXT = """سلام👋 
@@ -41,9 +38,7 @@ async def zip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_data[user_id] = {'files': [], 'password': None}
     
-    await update.message.reply_text(
-        "لطفاً رمز مورد نظر برای فایل زیپ را وارد کنید:"
-    )
+    await update.message.reply_text("لطفاً رمز مورد نظر برای فایل زیپ را وارد کنید:")
     return WAITING_PASSWORD
 
 async def receive_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -159,6 +154,7 @@ def main():
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN environment variable is required")
     
+    # استفاده از Application بدون Updater
     application = Application.builder().token(BOT_TOKEN).build()
     
     # handlers
@@ -178,6 +174,8 @@ def main():
     application.add_handler(conv_handler)
     application.add_error_handler(error_handler)
     
+    # راه‌اندازی بات
+    print("Bot is starting...")
     application.run_polling()
 
 if __name__ == "__main__":
