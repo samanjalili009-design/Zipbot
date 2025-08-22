@@ -3,9 +3,9 @@ import io
 import aiohttp
 import pyzipper
 import logging
+import asyncio
 from telegram import Update
-from telegram.ext import Updater, CommandHandler, MessageHandler, CallbackContext
-from telegram.ext import filters
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 # تنظیمات logging
 logging.basicConfig(
@@ -44,19 +44,21 @@ def parse_link(text):
             return part
     return None
 
-def start(update: Update, context: CallbackContext):
-    update.message.reply_text(HELP_TEXT)
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(HELP_TEXT)
 
 async def download_and_process_file(link, pwd, msg):
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(link) as resp:
                 if resp.status != 200:
-                    return await msg.reply_text(f"❌ دانلود موفق نبود! Status code: {resp.status}")
+                    await msg.reply_text(f"❌ دانلود موفق نبود! Status code: {resp.status}")
+                    return None
 
                 total = int(resp.headers.get("Content-Length", 0))
                 if total > MAX_FILE_SIZE:
-                    return await msg.reply_text(f"❌ حجم فایل بیش از 512MB است ({total / (1024*1024):.1f} MB)")
+                    await msg.reply_text(f"❌ حجم فایل بیش از 512MB است ({total / (1024*1024):.1f} MB)")
+                    return None
 
                 # دانلود به memory
                 file_data = bytearray()
@@ -67,7 +69,8 @@ async def download_and_process_file(link, pwd, msg):
                     downloaded += len(chunk)
                     
                     if downloaded > MAX_FILE_SIZE:
-                        return await msg.reply_text("❌ حجم فایل بیش از حد مجاز است")
+                        await msg.reply_text("❌ حجم فایل بیش از حد مجاز است")
+                        return None
 
                 await msg.reply_text("🔐 دارم فایل رو رمزگذاری می‌کنم...")
 
@@ -83,51 +86,52 @@ async def download_and_process_file(link, pwd, msg):
                 zip_size = len(zip_buffer.getvalue())
                 await msg.reply_text(f"✅ فشرده شد ({zip_size / (1024*1024):.1f} MB). دارم می‌فرستم...")
 
-                # ارسال فایل
-                zip_buffer.seek(0)
-                await msg.reply_document(
-                    document=zip_buffer,
-                    filename="file.zip",
-                    caption="📦 زیپ رمزدار آماده شد."
-                )
-                return True
+                return zip_buffer
 
     except Exception as e:
         await msg.reply_text(f"❌ خطا: {str(e)}")
-        return False
+        return None
 
-def on_text(update: Update, context: CallbackContext):
+async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     text = msg.text
     pwd = parse_password(text)
     link = parse_link(text)
 
     if not pwd:
-        msg.reply_text("❌ رمز پیدا نشد. در پیام بنویس: pass=1234")
+        await msg.reply_text("❌ رمز پیدا نشد. در پیام بنویس: pass=1234")
         return
     if not link:
-        msg.reply_text("❌ لینک فایل پیدا نشد. لینک مستقیم بده.")
+        await msg.reply_text("❌ لینک فایل پیدا نشد. لینک مستقیم بده.")
         return
 
-    msg.reply_text("⬇️ دارم دانلود می‌کنم...")
+    await msg.reply_text("⬇️ دارم دانلود می‌کنم...")
     
-    # اجرای عملیات دانلود به صورت async
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    result = loop.run_until_complete(download_and_process_file(link, pwd, msg))
-    loop.close()
+    zip_buffer = await download_and_process_file(link, pwd, msg)
+    
+    if zip_buffer:
+        try:
+            # ارسال فایل
+            zip_buffer.seek(0)
+            await msg.reply_document(
+                document=zip_buffer,
+                filename="file.zip",
+                caption="📦 زیپ رمزدار آماده شد."
+            )
+        except Exception as e:
+            await msg.reply_text(f"❌ خطا در ارسال فایل: {str(e)}")
 
 def main():
     try:
-        updater = Updater(BOT_TOKEN, use_context=True)
-        dp = updater.dispatcher
+        # ساخت Application با روش جدید
+        application = Application.builder().token(BOT_TOKEN).build()
         
-        dp.add_handler(CommandHandler("start", start))
-        dp.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+        # اضافه کردن handlerها
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
         
         print("🤖 ربات در حال اجرا است...")
-        updater.start_polling()
-        updater.idle()
+        application.run_polling()
         
     except Exception as e:
         print(f"خطا در اجرای ربات: {e}")
