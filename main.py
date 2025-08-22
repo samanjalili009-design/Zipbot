@@ -2,14 +2,18 @@ import os
 import logging
 import zipfile
 import tempfile
+import asyncio
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 
 # دریافت تنظیمات از Environment Variables
 TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '8145993181:AAFK7PeFs_9VsHqaP3iKagj9lWTNJXKpgjk')
 ACCOUNT_HASH = os.environ.get('ACCOUNT_HASH', 'f9e86b274826212a2712b18754fabc47')
 ALLOWED_USER_ID = int(os.environ.get('ALLOWED_USER_ID', '1867911'))
 MAX_FILE_SIZE = int(os.environ.get('MAX_FILE_SIZE', '2097152000'))
+
+# حالت‌های گفتگو
+WAITING_FOR_PASSWORD = 1
 
 # تنظیمات لاگ
 logging.basicConfig(
@@ -42,7 +46,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📦 نحوه استفاده:
 1. فایل‌های خود را ارسال کنید
 2. پس از اتمام از دستور /zip استفاده کنید
-3. فایل زیپ شده دریافت خواهد شد
+3. رمز عبور را وارد کنید
+4. فایل زیپ شده دریافت خواهد شد
 
 ⚡ حداکثر حجم: {MAX_FILE_SIZE // 1024 // 1024}MB
 """
@@ -86,7 +91,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"✅ فایل '{file_name}' ذخیره شد.\n"
             f"📊 تعداد فایل‌ها: {total_files}\n"
-            f"💾 حجم کل: {total_size // 1024 // 1024}MB"
+            f"💾 حجم کل: {total_size // 1024 // 1024}MB\n\n"
+            f"📝 پس از اتمام فایل‌ها، از /zip استفاده کنید."
         )
         
         logger.info(f"File received: {file_name}, size: {document.file_size}")
@@ -126,30 +132,54 @@ async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error listing files: {e}")
 
-async def zip_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """زیپ کردن فایل‌ها و ارسال"""
+async def ask_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """درخواست رمز از کاربر"""
     try:
         if not is_user_allowed(update.effective_user.id):
             await update.message.reply_text("❌ دسترسی denied.")
-            return
+            return ConversationHandler.END
         
         if 'files' not in context.user_data or not context.user_data['files']:
             await update.message.reply_text("❌ هیچ فایلی برای زیپ کردن وجود ندارد.")
-            return
+            return ConversationHandler.END
         
-        processing_msg = await update.message.reply_text("⏳ در حال پردازش فایل‌ها...")
+        await update.message.reply_text(
+            "🔐 لطفاً رمز عبور برای فایل زیپ را وارد کنید:\n\n"
+            "⚠️ توجه: این رمز برای باز کردن فایل زیپ لازم خواهد بود."
+        )
+        
+        return WAITING_FOR_PASSWORD
+        
+    except Exception as e:
+        logger.error(f"Error in ask_password: {e}")
+        await update.message.reply_text("❌ خطایی رخ داد.")
+        return ConversationHandler.END
+
+async def zip_files_with_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """زیپ کردن فایل‌ها با رمز عبور"""
+    try:
+        password = update.message.text.strip()
+        
+        if not password:
+            await update.message.reply_text("❌ رمز عبور نمی‌تواند خالی باشد. لطفاً مجدداً تلاش کنید.")
+            return WAITING_FOR_PASSWORD
+        
+        processing_msg = await update.message.reply_text("⏳ در حال ایجاد فایل زیپ با رمز عبور...")
         total_files = len(context.user_data['files'])
         
         with tempfile.TemporaryDirectory() as tmp_dir:
-            zip_path = os.path.join(tmp_dir, "archive.zip")
+            zip_path = os.path.join(tmp_dir, "protected_archive.zip")
             
+            # ایجاد فایل زیپ با رمز عبور
             with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                zipf.setpassword(password.encode('utf-8'))
+                
                 for i, file_info in enumerate(context.user_data['files'], 1):
                     try:
-                        if i % 3 == 0:
+                        if i % 2 == 0:
                             try:
                                 await processing_msg.edit_text(
-                                    f"⏳ پردازش فایل‌ها... ({i}/{total_files})"
+                                    f"⏳ در حال پردازش فایل‌ها... ({i}/{total_files})"
                                 )
                             except:
                                 pass
@@ -157,6 +187,8 @@ async def zip_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         file = await context.bot.get_file(file_info['file_id'])
                         file_download_path = os.path.join(tmp_dir, file_info['file_name'])
                         await file.download_to_drive(file_download_path)
+                        
+                        # اضافه کردن فایل به زیپ با رمز
                         zipf.write(file_download_path, file_info['file_name'])
                         
                     except Exception as e:
@@ -164,17 +196,21 @@ async def zip_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         continue
             
             try:
-                await processing_msg.edit_text("✅ فایل‌ها زیپ شدند. در حال ارسال...")
+                await processing_msg.edit_text("✅ فایل زیپ با رمز ایجاد شد. در حال ارسال...")
             except:
                 pass
             
+            # ارسال فایل زیپ
             with open(zip_path, 'rb') as zip_file:
                 await update.message.reply_document(
                     document=zip_file,
-                    caption=f"📦 {total_files} فایل زیپ شدند!",
-                    filename="archive.zip"
+                    caption=f"📦 {total_files} فایل با رمز عبور زیپ شدند!\n\n"
+                           f"🔐 رمز عبور: {password}\n"
+                           f"⚠️ این رمز را حفظ کنید!",
+                    filename="protected_files.zip"
                 )
             
+            # پاک کردن فایل‌های موقت
             context.user_data['files'] = []
             
             try:
@@ -182,11 +218,19 @@ async def zip_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 pass
             
-            logger.info(f"Successfully zipped and sent {total_files} files")
+            logger.info(f"Successfully zipped {total_files} files with password")
             
+        return ConversationHandler.END
+        
     except Exception as e:
-        logger.error(f"Error in zip_files: {e}")
-        await update.message.reply_text("❌ خطایی در پردازش فایل‌ها رخ داد.")
+        logger.error(f"Error in zip_files_with_password: {e}")
+        await update.message.reply_text("❌ خطایی در ایجاد فایل زیپ رخ داد.")
+        return ConversationHandler.END
+
+async def cancel_zip(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """لغو عملیات زیپ"""
+    await update.message.reply_text("❌ عملیات زیپ لغو شد.")
+    return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """پاک کردن فایل‌های ذخیره شده"""
@@ -215,7 +259,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📖 راهنمای ربات ZipBot:
 
 • /start - شروع ربات و نمایش اطلاعات
-• /zip - زیپ کردن و دریافت فایل‌ها
+• /zip - زیپ کردن فایل‌ها با رمز عبور
 • /list - نمایش لیست فایل‌های ذخیره شده
 • /cancel - پاک کردن فایل‌های ذخیره شده
 • /help - نمایش این راهنما
@@ -224,7 +268,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 1. فایل‌های خود را ارسال کنید
 2. از /list برای مشاهده فایل‌ها استفاده کنید
 3. از /zip برای زیپ کردن استفاده کنید
-4. از /cancel برای پاک کردن استفاده کنید
+4. رمز عبور را وارد کنید
+5. فایل زیپ شده را دریافت کنید
 
 ⚡ محدودیت‌ها:
 • حداکثر حجم فایل: {MAX_FILE_SIZE // 1024 // 1024}MB
@@ -255,9 +300,20 @@ def main():
         # ایجاد اپلیکیشن
         application = Application.builder().token(TOKEN).build()
         
+        # ایجاد ConversationHandler برای مدیریت رمز عبور
+        conv_handler = ConversationHandler(
+            entry_points=[CommandHandler('zip', ask_password)],
+            states={
+                WAITING_FOR_PASSWORD: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, zip_files_with_password)
+                ]
+            },
+            fallbacks=[CommandHandler('cancel', cancel_zip)]
+        )
+        
         # اضافه کردن handlerها
+        application.add_handler(conv_handler)
         application.add_handler(CommandHandler("start", start))
-        application.add_handler(CommandHandler("zip", zip_files))
         application.add_handler(CommandHandler("list", list_files))
         application.add_handler(CommandHandler("cancel", cancel))
         application.add_handler(CommandHandler("help", help_command))
