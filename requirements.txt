@@ -1,2 +1,3 @@
-python-telegram-bot==20.3
-requests
+python-telegram-bot==20.5
+aiohttp==3.9.5
+pyzipper==0.3.6
