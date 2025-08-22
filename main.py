@@ -8,7 +8,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 # دریافت تنظیمات از Environment Variables
 TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '8145993181:AAFK7PeFs_9VsHqaP3iKagj9lWTNJXKpgjk')
 ACCOUNT_HASH = os.environ.get('ACCOUNT_HASH', 'f9e86b274826212a2712b18754fabc47')
-ALLOWED_USER_ID = int(os.environ.get('ALLOWED_USER_ID', '1867911'))
+ALLOWED_USER_ID = int(os.environ.get('ALLOWED_USER_ID', '417536686'))
 MAX_FILE_SIZE = int(os.environ.get('MAX_FILE_SIZE', '2097152000'))
 
 # تنظیمات لاگ
