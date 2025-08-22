@@ -13,6 +13,7 @@ import aiofiles
 from pathlib import Path
 import asyncio
 import aiohttp
+import hashlib
 
 # ===== تنظیمات لاگ =====
 logging.basicConfig(
@@ -29,25 +30,25 @@ CHANNEL_ID = -1001093039800
 MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2GB
 MAX_TOTAL_SIZE = 4 * 1024 * 1024 * 1024  # 4GB
 MAX_FILES_COUNT = 20
-CHUNK_SIZE = 2 * 1024 * 1024  # 2MB
+CHUNK_SIZE = 4 * 1024 * 1024  # 4MB برای کاهش ریسک خطا
 
 WAITING_PASSWORD, WAITING_FILES = range(2)
 user_data: Dict[int, Dict] = {}
 
 HELP_TEXT = f"""🚀 سلام👋
-📦 بات فشرده‌ساز حرفه‌ای با پشتیبانی از فایل‌های بزرگ
+📦 بات فشرده‌ساز حرفه‌ای با پشتیبانی فایل‌های بزرگ
 
-📌 برای استفاده از بات ابتدا باید در کانال ما عضو شوید: {CHANNEL_USERNAME}
+📌 ابتدا در کانال عضو شوید: {CHANNEL_USERNAME}
 
 ✅ دستورات:
 🔹 /zip - شروع فشرده‌سازی
-🔹 /check - بررسی وضعیت عضویت
+🔹 /check - بررسی عضویت
 🔹 /limits - مشاهده محدودیت‌ها
 
 ⚡ قابلیت‌ها:
-• پشتیبانی فایل‌های تا ۲ گیگابایت
-• فشرده‌سازی با AES-256
-• دانلود تکه‌ای برای فایل‌های بزرگ
+• فایل تا ۲ گیگابایت
+• AES-256
+• دانلود تکه‌ای فایل‌های بزرگ
 """
 
 # ===== Helper functions =====
@@ -68,6 +69,14 @@ def format_size(size_bytes: int) -> str:
     p = math.pow(1024, i)
     s = round(size_bytes / p, 2)
     return f"{s} {size_names[i]}"
+
+
+def sha256_file(file_path: str) -> str:
+    sha256 = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            sha256.update(chunk)
+    return sha256.hexdigest()
 
 
 async def download_large_file_telegram(file_instance, file_path: str, file_size: int, update: Update) -> bool:
@@ -120,6 +129,7 @@ async def download_simple(file_instance, file_path: str) -> bool:
     except Exception as e:
         logger.error(f"Simple download error: {e}")
         return False
+
 
 # ===== Handlers =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
