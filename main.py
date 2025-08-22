@@ -1,6 +1,5 @@
 import os
 import tempfile
-import asyncio
 import pyzipper
 from telegram import Update, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
@@ -58,11 +57,11 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             caption="📦 زیپ رمزدار آماده شد."  
         )
 
-async def main():
+def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
-    await app.run_polling()
+    app.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
