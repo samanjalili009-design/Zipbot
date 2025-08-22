@@ -6,9 +6,9 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 import logging
 from typing import Dict
 import math
-import aiohttp
 import aiofiles
 from pathlib import Path
+import asyncio
 
 # تنظیمات لاگ
 logging.basicConfig(
@@ -67,26 +67,37 @@ def format_size(size_bytes):
     s = round(size_bytes / p, 2)
     return f"{s} {size_names[i]}"
 
-async def download_large_file_telegram(file_instance, file_path: str, file_size: int, update: Update, bot):
+async def download_large_file_telegram(file_instance, file_path: str, file_size: int, update: Update):
     """دانلود فایل‌های بزرگ از تلگرام با نمایش پیشرفت"""
     try:
         downloaded = 0
         last_progress = 0
         
-        async with aiofiles.open(file_path, 'wb') as f:
-            # استفاده از دانلود تدریجی تلگرام
-            async for chunk in bot.get_file(file_instance.file_id).download_as_bytearray():
-                await f.write(chunk)
-                downloaded += len(chunk)
+        # دریافت لینک مستقیم فایل
+        file = await file_instance.get_file()
+        file_url = file.file_path
+        
+        # استفاده از aiohttp برای دانلود
+        import aiohttp
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_url}") as response:
+                if response.status != 200:
+                    raise Exception(f"Download failed with status {response.status}")
                 
-                # ارسال وضعیت هر 10%
-                progress = (downloaded / file_size) * 100
-                if progress - last_progress >= 10:
-                    await update.message.reply_text(
-                        f"📥 دانلود: {format_size(downloaded)} / {format_size(file_size)} "
-                        f"({int(progress)}%)"
-                    )
-                    last_progress = progress
+                async with aiofiles.open(file_path, 'wb') as f:
+                    async for chunk in response.content.iter_chunked(CHUNK_SIZE):
+                        await f.write(chunk)
+                        downloaded += len(chunk)
+                        
+                        # ارسال وضعیت هر 10%
+                        progress = (downloaded / file_size) * 100
+                        if progress - last_progress >= 10:
+                            await update.message.reply_text(
+                                f"📥 دانلود: {format_size(downloaded)} / {format_size(file_size)} "
+                                f"({int(progress)}%)"
+                            )
+                            last_progress = progress
         
         return True
         
@@ -94,13 +105,13 @@ async def download_large_file_telegram(file_instance, file_path: str, file_size:
         logger.error(f"Download error: {e}")
         return False
 
-async def download_with_retry(file_instance, file_path: str, file_size: int, update: Update, bot, max_retries=3):
+async def download_with_retry(file_instance, file_path: str, file_size: int, update: Update, max_retries=3):
     """دانلود با قابلیت تکرار در صورت خطا"""
     for attempt in range(max_retries):
         try:
             await update.message.reply_text(f"📥 شروع دانلود (تلاش {attempt + 1}/{max_retries})...")
             
-            success = await download_large_file_telegram(file_instance, file_path, file_size, update, bot)
+            success = await download_large_file_telegram(file_instance, file_path, file_size, update)
             if success:
                 return True
                 
@@ -110,6 +121,16 @@ async def download_with_retry(file_instance, file_path: str, file_size: int, upd
                 await asyncio.sleep(2)  # انتظار قبل از تلاش مجدد
                 
     return False
+
+async def download_simple(file_instance, file_path: str):
+    """دانلود ساده برای فایل‌های کوچک"""
+    try:
+        file = await file_instance.get_file()
+        await file.download_to_drive(file_path)
+        return True
+    except Exception as e:
+        logger.error(f"Simple download error: {e}")
+        return False
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -238,26 +259,25 @@ async def receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         temp_dir = Path(tempfile.mkdtemp())
         temp_file_path = temp_dir / document.file_name
         
-        # دانلود فایل - روش جدید
-        if document.file_size > 10 * 1024 * 1024:  # برای فایل‌های بزرگتر از 10 مگابایت
+        # دانلود فایل بر اساس حجم
+        if document.file_size > 50 * 1024 * 1024:  # برای فایل‌های بزرگتر از 50 مگابایت
             await update.message.reply_text(
                 f"📥 شروع دانلود فایل بزرگ...\n"
                 f"📊 حجم: {format_size(document.file_size)}\n"
                 f"⏳ لطفاً منتظر بمانید..."
             )
             
-            # استفاده از متد دانلود مستقیم تلگرام
-            success = await download_with_retry(
-                document, str(temp_file_path), document.file_size, update, context.bot
-            )
+            success = await download_with_retry(document, str(temp_file_path), document.file_size, update)
             
             if not success:
                 await update.message.reply_text("❌ خطا در دانلود فایل. لطفاً دوباره امتحان کنید.")
                 return WAITING_FILES
         else:
             # دانلود معمولی برای فایل‌های کوچک
-            file = await document.get_file()
-            await file.download_to_drive(str(temp_file_path))
+            success = await download_simple(document, str(temp_file_path))
+            if not success:
+                await update.message.reply_text("❌ خطا در دانلود فایل. لطفاً دوباره امتحان کنید.")
+                return WAITING_FILES
         
         user_data[user_id]['files'].append({
             'name': document.file_name,
