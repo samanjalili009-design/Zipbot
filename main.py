@@ -3,7 +3,6 @@ import tempfile
 import pyzipper
 import logging
 import shutil
-from datetime import datetime
 
 # تنظیمات لاگ
 logging.basicConfig(
@@ -12,13 +11,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ایمپورت‌های سازگار با نسخه پایین
+# ایمپورت نسخه سازگار
 try:
     from telegram import Update
-    from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+    from telegram.ext import Updater, CommandHandler, MessageHandler, CallbackContext
+    from telegram.ext import Filters
 except ImportError:
-    print("❌ Error importing telegram modules")
-    exit(1)
+    try:
+        # برای نسخه‌های جدیدتر
+        from telegram import Update
+        from telegram.ext import Updater, CommandHandler, MessageHandler, CallbackContext
+        import telegram.ext.filters as Filters
+    except ImportError as e:
+        logger.error(f"Import error: {e}")
+        exit(1)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
@@ -283,6 +289,7 @@ def main():
         updater = Updater(token=BOT_TOKEN, use_context=True)
         dispatcher = updater.dispatcher
         
+        # استفاده از Filters به صورت مستقیم
         dispatcher.add_handler(CommandHandler("start", start))
         dispatcher.add_handler(CommandHandler("done", done_command))
         dispatcher.add_handler(CommandHandler("cancel", cancel_command))
