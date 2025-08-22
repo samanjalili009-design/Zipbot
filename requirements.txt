@@ -1,2 +1,2 @@
-python-telegram-bot==20.07
+python-telegram-bot==13.7
 pyzipper==0.3.6
