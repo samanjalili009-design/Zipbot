@@ -1,9 +1,8 @@
 import os
 import io
-import aiohttp
+import requests
 import pyzipper
 import logging
-import asyncio
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
@@ -19,7 +18,6 @@ if not BOT_TOKEN:
     raise RuntimeError("❌ BOT_TOKEN not found! Set it in Render Environment Variables")
 
 MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB برای اطمینان
-CHUNK_SIZE = 512 * 1024  # 512KB chunks
 
 HELP_TEXT = """
 🔐 **File Zipper Bot**
@@ -74,13 +72,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await message.reply_text("⬇️ در حال دانلود فایل...")
         
-        # دانلود فایل
-        file_data = await download_file(file_url, message)
+        # دانلود فایل با requests (سازگار با همه نسخه‌ها)
+        file_data = download_file(file_url, message)
         if not file_data:
             return
             
         # ایجاد زیپ رمزدار
-        zip_buffer = await create_encrypted_zip(file_data, password, message)
+        zip_buffer = create_encrypted_zip(file_data, password, message)
         if not zip_buffer:
             return
             
@@ -91,44 +89,45 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error in handle_message: {e}")
         await message.reply_text(f"❌ خطای سیستمی: {str(e)}")
 
-async def download_file(url: str, message) -> bytes:
-    """دانلود فایل از لینک"""
+def download_file(url: str, message) -> bytes:
+    """دانلود فایل از لینک با requests"""
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as response:
-                if response.status != 200:
-                    await message.reply_text(f"❌ خطا در دانلود! کد وضعیت: {response.status}")
+        response = requests.get(url, stream=True, timeout=30)
+        response.raise_for_status()
+        
+        content_length = int(response.headers.get('Content-Length', 0))
+        if content_length > MAX_FILE_SIZE:
+            size_mb = content_length / (1024 * 1024)
+            message.reply_text(f"❌ حجم فایل زیاد است! ({size_mb:.1f}MB > 100MB)")
+            return None
+        
+        # دانلود فایل
+        file_data = bytearray()
+        downloaded = 0
+        
+        for chunk in response.iter_content(chunk_size=8192):
+            if chunk:
+                file_data.extend(chunk)
+                downloaded += len(chunk)
+                
+                if downloaded > MAX_FILE_SIZE:
+                    message.reply_text("❌ حجم فایل بیش از حد مجاز است!")
                     return None
-                
-                content_length = int(response.headers.get('Content-Length', 0))
-                if content_length > MAX_FILE_SIZE:
-                    size_mb = content_length / (1024 * 1024)
-                    await message.reply_text(f"❌ حجم فایل زیاد است! ({size_mb:.1f}MB > 100MB)")
-                    return None
-                
-                # دانلود chunk به chunk
-                file_data = bytearray()
-                downloaded = 0
-                
-                async for chunk in response.content.iter_chunked(CHUNK_SIZE):
-                    file_data.extend(chunk)
-                    downloaded += len(chunk)
-                    
-                    if downloaded > MAX_FILE_SIZE:
-                        await message.reply_text("❌ حجم فایل بیش از حد مجاز است!")
-                        return None
-                
-                await message.reply_text(f"✅ دانلود کامل شد ({downloaded/(1024*1024):.1f}MB)")
-                return bytes(file_data)
-                
+        
+        message.reply_text(f"✅ دانلود کامل شد ({downloaded/(1024*1024):.1f}MB)")
+        return bytes(file_data)
+        
+    except requests.exceptions.RequestException as e:
+        message.reply_text(f"❌ خطا در دانلود: {str(e)}")
+        return None
     except Exception as e:
-        await message.reply_text(f"❌ خطا در دانلود: {str(e)}")
+        message.reply_text(f"❌ خطا در پردازش: {str(e)}")
         return None
 
-async def create_encrypted_zip(file_data: bytes, password: str, message) -> io.BytesIO:
+def create_encrypted_zip(file_data: bytes, password: str, message) -> io.BytesIO:
     """ایجاد زیپ رمزدار"""
     try:
-        await message.reply_text("🔐 در حال رمزگذاری فایل...")
+        message.reply_text("🔐 در حال رمزگذاری فایل...")
         
         zip_buffer = io.BytesIO()
         
@@ -142,12 +141,12 @@ async def create_encrypted_zip(file_data: bytes, password: str, message) -> io.B
             zf.writestr("file", file_data)
         
         zip_size = len(zip_buffer.getvalue())
-        await message.reply_text(f"✅ رمزگذاری کامل شد ({zip_size/(1024*1024):.1f}MB)")
+        message.reply_text(f"✅ رمزگذاری کامل شد ({zip_size/(1024*1024):.1f}MB)")
         
         return zip_buffer
         
     except Exception as e:
-        await message.reply_text(f"❌ خطا در رمزگذاری: {str(e)}")
+        message.reply_text(f"❌ خطا در رمزگذاری: {str(e)}")
         return None
 
 async def send_zip_file(zip_buffer: io.BytesIO, message):
@@ -167,7 +166,7 @@ async def send_zip_file(zip_buffer: io.BytesIO, message):
 def main():
     """تابع اصلی اجرای ربات"""
     try:
-        # ساخت اپلیکیشن با تنظیمات ساده
+        # ساخت اپلیکیشن
         application = Application.builder().token(BOT_TOKEN).build()
         
         # اضافه کردن handlerها
@@ -176,24 +175,8 @@ def main():
         
         # اجرای ربات
         print("🤖 ربات File Zipper در حال اجرا است...")
-        print(f"🤖 استفاده از توکن: {BOT_TOKEN[:10]}...")
+        application.run_polling()
         
-        # اجرای ربات با مدیریت خطا
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(application.initialize())
-        loop.run_until_complete(application.start())
-        
-        print("✅ ربات با موفقیت راه اندازی شد")
-        
-        # نگه داشتن برنامه در حال اجرا
-        try:
-            loop.run_forever()
-        except KeyboardInterrupt:
-            pass
-        finally:
-            loop.run_until_complete(application.stop())
-            loop.run_until_complete(application.shutdown())
-            
     except Exception as e:
         logger.error(f"خطا در اجرای ربات: {e}")
         print(f"❌ خطا: {e}")
