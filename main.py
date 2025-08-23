@@ -4,6 +4,7 @@ import tempfile
 import time
 import pyzipper
 import logging
+import sys
 from pyrogram import Client
 from telegram import Update, InputFile
 from telegram.ext import (
@@ -24,9 +25,14 @@ MAX_FILE_SIZE = 2097152000  # 2GB پیش‌فرض
 
 WAITING_FOR_PASSWORD = 1
 
+# تنظیمات لاگ برای Render
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('bot.log')
+    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -41,14 +47,11 @@ def get_progress_bar(percent: int, length: int = 20):
 
 # ===== پیشرفت دانلود =====
 async def progress_callback(current, total, msg, start_time, file_name):
-    percent = int(current * 100 / total)
-    elapsed = time.time() - start_time
-    if elapsed > 0:
-        speed = current / elapsed / 1024  # KB/s
-    else:
-        speed = 0
-    
     try:
+        percent = int(current * 100 / total) if total > 0 else 0
+        elapsed = time.time() - start_time
+        speed = current / elapsed / 1024 if elapsed > 0 else 0
+        
         bar = get_progress_bar(percent)
         await msg.edit_text(
             f"📂 فایل: {file_name}\n"
@@ -121,14 +124,17 @@ async def zip_files_with_userbot(update: Update, context: ContextTypes.DEFAULT_T
     
     userbot = None
     try:
+        # ایجاد userbot با تنظیمات مناسب برای Render
         userbot = Client(
             "userbot_session", 
             api_id=API_ID, 
             api_hash=API_HASH,
-            in_memory=True  # جلوگیری از مشکلات فایل session
+            in_memory=True,
+            no_updates=True  # غیرفعال کردن دریافت آپدیت‌ها
         )
         
         await userbot.start()
+        logger.info("Userbot started successfully")
         
         with tempfile.TemporaryDirectory() as tmp_dir:
             zip_file_name = f"archive_{int(time.time())}.zip"
@@ -161,6 +167,7 @@ async def zip_files_with_userbot(update: Update, context: ContextTypes.DEFAULT_T
                             zipf.setpassword(zip_password.encode())
 
                         zipf.write(file_path, f["file_name"])
+                        os.remove(file_path)  # پاک کردن فایل موقت
 
                         percent_total = int((i / total_files) * 100)
                         bar_total = get_progress_bar(percent_total)
@@ -176,20 +183,21 @@ async def zip_files_with_userbot(update: Update, context: ContextTypes.DEFAULT_T
 
             # ارسال فایل زیپ شده
             await update.message.reply_document(
-                InputFile(zip_path), 
+                InputFile(zip_path, filename=zip_file_name), 
                 caption=f"✅ فایل زیپ آماده شد!\n🔐 رمز: {user_password}"
             )
+            logger.info("Zip file sent successfully")
 
     except Exception as e:
-        logger.error(f"Error in zip process: {e}")
+        logger.error(f"Error in zip process: {e}", exc_info=True)
         await update.message.reply_text("❌ خطایی در پردازش فایل‌ها رخ داد.")
     
     finally:
         # مدیریت صحیح بستن userbot
         if userbot:
             try:
-                if await userbot.is_connected():
-                    await userbot.stop()
+                await userbot.stop()
+                logger.info("Userbot stopped successfully")
             except Exception as e:
                 logger.warning(f"Error stopping userbot: {e}")
 
@@ -217,7 +225,7 @@ async def clear_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📭 هیچ فایلی برای پاک کردن وجود ندارد.")
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.error("Exception while handling an update:", exc_info=context.error)
+    logger.error("Exception while handling an update:", exc_info=True)
     try:
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
@@ -228,28 +236,41 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== ران اصلی =====
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
-    
-    # اضافه کردن error handler
-    app.add_error_handler(error_handler)
+    try:
+        app = Application.builder().token(BOT_TOKEN).build()
+        
+        # اضافه کردن error handler
+        app.add_error_handler(error_handler)
 
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("zip", ask_password)],
-        states={
-            WAITING_FOR_PASSWORD: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, zip_files_with_userbot)
-            ]
-        },
-        fallbacks=[CommandHandler("cancel", cancel_zip)],
-    )
+        conv_handler = ConversationHandler(
+            entry_points=[CommandHandler("zip", ask_password)],
+            states={
+                WAITING_FOR_PASSWORD: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, zip_files_with_userbot)
+                ]
+            },
+            fallbacks=[CommandHandler("cancel", cancel_zip)],
+        )
 
-    app.add_handler(conv_handler)
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
-    app.add_handler(CommandHandler("clear", clear_files))
+        app.add_handler(conv_handler)
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
+        app.add_handler(CommandHandler("clear", clear_files))
 
-    logger.info("Bot is starting...")
-    app.run_polling(drop_pending_updates=True)
+        logger.info("Bot is starting on Render...")
+        
+        # اجرای ربات با پورت مناسب برای Render
+        port = int(os.environ.get('PORT', 10000))
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path=BOT_TOKEN,
+            webhook_url=f"https://your-render-app-name.onrender.com/{BOT_TOKEN}"
+        )
+        
+    except Exception as e:
+        logger.error(f"Failed to start bot: {e}", exc_info=True)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
