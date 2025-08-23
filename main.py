@@ -17,14 +17,10 @@ from telegram.ext import (
 
 # ===== تنظیمات =====
 BOT_TOKEN = "8145993181:AAFK7PeFs_9VsHqaP3iKagj9lWTNJXKpgjk"
-ACCOUNT_HASH = "f9e86b274826212a2712b18754fabc47"
-ALLOWED_USER_ID = 417536686
-MAX_FILE_SIZE = 2097152000  # 2GB پیش‌فرض
-
-# Userbot
 API_ID = 1867911
 API_HASH = "f9e86b274826212a2712b18754fabc47"
-userbot = Client("userbot_session", api_id=API_ID, api_hash=API_HASH)
+ALLOWED_USER_ID = 417536686
+MAX_FILE_SIZE = 2097152000  # 2GB پیش‌فرض
 
 WAITING_FOR_PASSWORD = 1
 
@@ -114,21 +110,27 @@ async def zip_files_with_userbot(update: Update, context: ContextTypes.DEFAULT_T
     with tempfile.TemporaryDirectory() as tmp_dir:
         zip_file_name = f"archive_{int(time.time())}.zip"
         zip_path = os.path.join(tmp_dir, zip_file_name)
+        
+        # ایجاد و راه‌اندازی userbot
+        userbot = Client("userbot_session", api_id=API_ID, api_hash=API_HASH)
+        
+        try:
+            await userbot.start()
+            
+            with pyzipper.AESZipFile(
+                zip_path,
+                "w",
+                compression=pyzipper.ZIP_DEFLATED,
+                encryption=pyzipper.WZ_AES,
+            ) as zipf:
+                zipf.setpassword(user_password.encode())
 
-        with pyzipper.AESZipFile(
-            zip_path,
-            "w",
-            compression=pyzipper.ZIP_DEFLATED,
-            encryption=pyzipper.WZ_AES,
-        ) as zipf:
-            zipf.setpassword(user_password.encode())
-
-            async with userbot:
                 total_files = len(context.user_data["files"])
                 for i, f in enumerate(context.user_data["files"], 1):
                     try:
                         file_path = os.path.join(tmp_dir, f["file_name"])
                         start_time = time.time()
+                        
                         # دانلود با پیشرفت
                         await userbot.download_media(
                             f["file_id"],
@@ -156,7 +158,13 @@ async def zip_files_with_userbot(update: Update, context: ContextTypes.DEFAULT_T
                         logger.error(f"Error processing file {f['file_name']}: {e}")
                         continue
 
-        await update.message.reply_document(InputFile(zip_path), caption=f"✅ فایل زیپ آماده شد!\n🔐 رمز: {user_password}")
+            await update.message.reply_document(InputFile(zip_path), caption=f"✅ فایل زیپ آماده شد!\n🔐 رمز: {user_password}")
+
+        except Exception as e:
+            logger.error(f"Error in zip process: {e}")
+            await update.message.reply_text("❌ خطایی در پردازش فایل‌ها رخ داد.")
+        finally:
+            await userbot.stop()
 
     context.user_data["files"] = []
     try:
@@ -178,9 +186,22 @@ async def clear_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("📭 هیچ فایلی برای پاک کردن وجود ندارد.")
 
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.error("Exception while handling an update:", exc_info=context.error)
+    try:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="❌ خطایی رخ داد. لطفاً دوباره تلاش کنید."
+        )
+    except:
+        pass
+
 # ===== ران اصلی =====
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
+    
+    # اضافه کردن error handler
+    app.add_error_handler(error_handler)
 
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("zip", ask_password)],
@@ -191,10 +212,9 @@ def main():
     app.add_handler(conv_handler)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
-    app.add_handler(CommandHandler("cancel", cancel_zip))
     app.add_handler(CommandHandler("clear", clear_files))
 
     app.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()  # بدون asyncio.run()
