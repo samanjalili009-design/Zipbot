@@ -6,6 +6,7 @@ import pyzipper
 import logging
 import sys
 from pyrogram import Client
+from pyrogram.errors import SessionPasswordNeeded
 from telegram import Update, InputFile
 from telegram.ext import (
     Application,
@@ -23,6 +24,9 @@ API_HASH = "f9e86b274826212a2712b18754fabc47"
 ALLOWED_USER_ID = 417536686
 MAX_FILE_SIZE = 2097152000  # 2GB پیش‌فرض
 
+# برای Pyrogram - استفاده از bot token به جای user account
+USERBOT_SESSION = "bot"  # یا می‌توانید از session string استفاده کنید
+
 WAITING_FOR_PASSWORD = 1
 
 # تنظیمات لاگ برای Render
@@ -31,7 +35,6 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler('bot.log')
     ]
 )
 logger = logging.getLogger(__name__)
@@ -124,17 +127,18 @@ async def zip_files_with_userbot(update: Update, context: ContextTypes.DEFAULT_T
     
     userbot = None
     try:
-        # ایجاد userbot با تنظیمات مناسب برای Render
+        # استفاده از bot token برای Pyrogram - بدون نیاز به ورودی کاربر
         userbot = Client(
             "userbot_session", 
             api_id=API_ID, 
             api_hash=API_HASH,
+            bot_token=BOT_TOKEN,  # استفاده از bot token
             in_memory=True,
             no_updates=True
         )
         
         await userbot.start()
-        logger.info("Userbot started successfully")
+        logger.info("Userbot started successfully with bot token")
         
         with tempfile.TemporaryDirectory() as tmp_dir:
             zip_file_name = f"archive_{int(time.time())}.zip"
@@ -154,12 +158,16 @@ async def zip_files_with_userbot(update: Update, context: ContextTypes.DEFAULT_T
                         file_path = os.path.join(tmp_dir, f["file_name"])
                         start_time = time.time()
                         
-                        # دانلود با پیشرفت
-                        await userbot.download_media(
-                            f["file_id"],
-                            file_path,
-                            progress=progress_callback,
-                            progress_args=(processing_msg, start_time, f["file_name"])
+                        # دانلود با استفاده از bot telegram (نه pyrogram)
+                        file = await context.bot.get_file(f["file_id"])
+                        await file.download_to_drive(file_path)
+                        
+                        # به روز رسانی وضعیت
+                        percent_download = 100
+                        bar_download = get_progress_bar(percent_download)
+                        await processing_msg.edit_text(
+                            f"📥 دانلود: {bar_download}\n"
+                            f"📦 در حال اضافه کردن فایل: {f['file_name']}"
                         )
 
                         zip_password = f["password"] or user_password
@@ -260,7 +268,11 @@ def main():
         logger.info("Bot is starting on Render with polling...")
         
         # استفاده از polling به جای webhook
-        app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
+        app.run_polling(
+            drop_pending_updates=True,
+            allowed_updates=Update.ALL_TYPES,
+            close_loop=False
+        )
         
     except Exception as e:
         logger.error(f"Failed to start bot: {e}", exc_info=True)
