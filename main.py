@@ -130,7 +130,7 @@ async def zip_files_with_userbot(update: Update, context: ContextTypes.DEFAULT_T
             api_id=API_ID, 
             api_hash=API_HASH,
             in_memory=True,
-            no_updates=True  # غیرفعال کردن دریافت آپدیت‌ها
+            no_updates=True
         )
         
         await userbot.start()
@@ -257,16 +257,10 @@ def main():
         app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
         app.add_handler(CommandHandler("clear", clear_files))
 
-        logger.info("Bot is starting on Render...")
+        logger.info("Bot is starting on Render with polling...")
         
-        # اجرای ربات با پورت مناسب برای Render
-        port = int(os.environ.get('PORT', 10000))
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=port,
-            url_path=BOT_TOKEN,
-            webhook_url=f"https://your-render-app-name.onrender.com/{BOT_TOKEN}"
-        )
+        # استفاده از polling به جای webhook
+        app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
         
     except Exception as e:
         logger.error(f"Failed to start bot: {e}", exc_info=True)
