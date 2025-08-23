@@ -5,131 +5,218 @@ import time
 import pyzipper
 import logging
 import sys
-from telegram import Update, InputFile
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-    ConversationHandler,
-)
+from pyrogram import Client, filters
+from pyrogram.types import Message, Document
+from pyrogram.errors import RPCError
+from pyrogram.session import StringSession
 
 # ===== تنظیمات =====
-BOT_TOKEN = "8145993181:AAFK7PeFs_9VsHqaP3iKagj9lWTNJXKpgjk"
+API_ID = 1867911
+API_HASH = "f9e86b274826212a2712b18754fabc47"
+SESSION_STRING = "1BJWap1sBu090MF0_cVWIe-T4J5v18SuER7_K9izg1Tu6-krlOFLai0LVbGGBPTfqHCpgN7ul8sUp5BiX2ra7rkrh0mC_UF4hr93vJ4JA5RS2AbMH_mB4VuIi7wyu1v4ngBBLkZHtzQsY9SiICzynZdK7CnzrIERQJNrfXU7oG_6mA6JGFCO8jQkDzlR28LOhi90YhYk1A0yPRWFk5ItKAdyfbKBc6wGyhB9h6LnsCbdY-XhPoAlki2K4kH00pGGzM4i0j73UhzEqDnVZjJQoqtciekW5Ceyu02PsOtuoy8oNpXGaj49pNq5BxMyGNCm3TjqxlA3iXoZJe3x-JEZQ9xf1Zl5H7Vk="
 ALLOWED_USER_ID = 417536686
-MAX_FILE_SIZE = 2097152000  # 2GB پیش‌فرض
-MAX_DOWNLOAD_SIZE = 2097152000  # حداکثر حجم برای دانلود مستقیم
+MAX_FILE_SIZE = 2097152000  # 2GB
+MAX_TOTAL_SIZE = 2097152000  # 2GB برای کل فایل‌ها
 
-WAITING_FOR_PASSWORD = 1
-
-# تنظیمات لاگ برای Render
+# تنظیمات لاگ
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-    ]
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
-logger = logging.getLogger(name)
+logger = logging.getLogger(__name__)
+
+# دیکشنری برای ذخیره فایل‌های کاربران
+user_files = {}
 
 def is_user_allowed(user_id: int) -> bool:
     return user_id == ALLOWED_USER_ID
 
-# ===== نوار پیشرفت =====
 def get_progress_bar(percent: int, length: int = 20):
     filled_length = int(length * percent // 100)
     bar = '■' * filled_length + '□' * (length - filled_length)
     return f"[{bar}] {percent}%"
 
-# ===== پیشرفت دانلود =====
-async def progress_callback(current, total, start_time, file_name, processing_msg):
+async def progress_callback(current, total, message: Message, file_name: str, operation: str):
     try:
         percent = int(current * 100 / total) if total > 0 else 0
-        elapsed = time.time() - start_time
+        elapsed = time.time() - getattr(progress_callback, 'start_time', time.time())
         speed = current / elapsed / 1024 if elapsed > 0 else 0
         
         bar = get_progress_bar(percent)
-        await processing_msg.edit_text(
+        
+        text = (
             f"📂 فایل: {file_name}\n"
             f"📊 {bar} ({current//1024//1024}/{total//1024//1024} MB)\n"
-            f"💾 سرعت: {int(speed)} KB/s"
+            f"💾 سرعت: {int(speed)} KB/s\n"
+            f"🔄 عملیات: {operation}"
         )
+        
+        if hasattr(progress_callback, 'last_message'):
+            try:
+                await progress_callback.last_message.edit_text(text)
+            except:
+                progress_callback.last_message = await message.reply_text(text)
+        else:
+            progress_callback.last_message = await message.reply_text(text)
+            
     except Exception as e:
         logger.warning(f"Could not update progress: {e}")
 
-# ===== دستورات ربات =====
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
+# دستور استارت
+@Client.on_message(filters.command("start"))
+async def start(client: Client, message: Message):
+    if not is_user_allowed(message.from_user.id):
+        return await message.reply_text("❌ دسترسی denied.")
+    
+    await message.reply_text(
         "سلام 👋\nفایل‌تو بفرست تا برات زیپ کنم (رمزدار هم میشه).\n"
         "💡 کپشن فایل = pass=رمز برای تعیین پسورد\n"
-        f"📦 حداکثر حجم هر فایل: {MAX_FILE_SIZE // 1024 // 1024}MB"
+        f"📦 حداکثر حجم هر فایل: {MAX_FILE_SIZE // 1024 // 1024}MB\n"
+        f"📦 حداکثر حجم کل: {MAX_TOTAL_SIZE // 1024 // 1024}MB"
     )
 
-async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_user_allowed(update.effective_user.id):
-        return await update.message.reply_text("❌ دسترسی denied.")
+# مدیریت فایل‌ها
+@Client.on_message(filters.document)
+async def handle_file(client: Client, message: Message):
+    if not is_user_allowed(message.from_user.id):
+        return await message.reply_text("❌ دسترسی denied.")
 
-    if not update.message.document:
-        return await update.message.reply_text("فقط فایل بفرست 🌹")
+    doc = message.document
+    if not doc:
+        return await message.reply_text("فقط فایل بفرست 🌹")
 
-    doc = update.message.document
-    file_id = doc.file_id
-    caption = update.message.caption or ""
+    file_name = doc.file_name or f"file_{message.id}"
+    caption = message.caption or ""
     password = None
-    if caption.startswith("pass="):
-        password = caption.split("=", 1)[1].strip()
+    
+    if caption and "pass=" in caption:
+        password = caption.split("pass=", 1)[1].split()[0].strip()
 
     if doc.file_size and doc.file_size > MAX_FILE_SIZE:
-        return await update.message.reply_text(
+        return await message.reply_text(
             f"❌ حجم فایل بیش از حد مجاز است! (حداکثر {MAX_FILE_SIZE // 1024 // 1024}MB)"
         )
 
-    if "files" not in context.user_data:
-        context.user_data["files"] = []
+    user_id = message.from_user.id
+    if user_id not in user_files:
+        user_files[user_id] = []
 
-    context.user_data["files"].append({
-        "file_id": file_id, 
-        "file_name": doc.file_name, 
+    user_files[user_id].append({
+        "message": message,
+        "file_name": file_name,
         "password": password,
         "file_size": doc.file_size
     })
     
-    await update.message.reply_text(
-        f"✅ فایل '{doc.file_name}' ذخیره شد.\n📝 برای زیپ کردن همه فایل‌ها /zip را بزنید"
+    total_size = sum(f["file_size"] for f in user_files[user_id])
+    
+    await message.reply_text(
+        f"✅ فایل '{file_name}' ذخیره شد.\n"
+        f"📦 حجم کل: {total_size//1024//1024}MB\n"
+        f"📝 برای زیپ کردن همه فایل‌ها /zip را بزنید"
     )
 
-async def ask_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_user_allowed(update.effective_user.id):
-        await update.message.reply_text("❌ دسترسی denied.")
-        return ConversationHandler.END
+# لیست فایل‌ها
+@Client.on_message(filters.command("list"))
+async def list_files(client: Client, message: Message):
+    if not is_user_allowed(message.from_user.id):
+        return await message.reply_text("❌ دسترسی denied.")
 
-    if "files" not in context.user_data or not context.user_data["files"]:
-        await update.message.reply_text("❌ هیچ فایلی برای زیپ کردن وجود ندارد.")
-        return ConversationHandler.END
+    user_id = message.from_user.id
+    if user_id not in user_files or not user_files[user_id]:
+        return await message.reply_text("📭 هیچ فایلی ذخیره نشده است.")
 
-    # بررسی حجم کل فایل‌ها
-    total_size = sum(f["file_size"] for f in context.user_data["files"] if f["file_size"])
-    if total_size > MAX_DOWNLOAD_SIZE:
-        await update.message.reply_text(
+    files_list = "\n".join([
+        f"📄 {f['file_name']} ({f['file_size']//1024//1024}MB)" 
+        for f in user_files[user_id]
+    ])
+    
+    total_size = sum(f["file_size"] for f in user_files[user_id])
+    
+    await message.reply_text(
+        f"📋 فایل‌های ذخیره شده:\n{files_list}\n\n"
+        f"📦 حجم کل: {total_size//1024//1024}MB\n"
+        f"🔢 تعداد: {len(user_files[user_id])} فایل"
+    )
+
+# پاک کردن فایل‌ها
+@Client.on_message(filters.command("clear"))
+async def clear_files(client: Client, message: Message):
+    if not is_user_allowed(message.from_user.id):
+        return await message.reply_text("❌ دسترسی denied.")
+
+    user_id = message.from_user.id
+    if user_id in user_files and user_files[user_id]:
+        count = len(user_files[user_id])
+        user_files[user_id] = []
+        await message.reply_text(f"✅ {count} فایل ذخیره شده پاک شدند.")
+    else:
+        await message.reply_text("📭 هیچ فایلی برای پاک کردن وجود ندارد.")
+
+# شروع فرآیند زیپ
+@Client.on_message(filters.command("zip"))
+async def start_zip(client: Client, message: Message):
+    if not is_user_allowed(message.from_user.id):
+        return await message.reply_text("❌ دسترسی denied.")
+
+    user_id = message.from_user.id
+    if user_id not in user_files or not user_files[user_id]:
+        return await message.reply_text("❌ هیچ فایلی برای زیپ کردن وجود ندارد.")
+
+    # بررسی حجم کل
+    total_size = sum(f["file_size"] for f in user_files[user_id])
+    if total_size > MAX_TOTAL_SIZE:
+        await message.reply_text(
             f"❌ حجم کل فایل‌ها ({total_size//1024//1024}MB) بیش از حد مجاز است! "
-            f"(حداکثر {MAX_DOWNLOAD_SIZE//1024//1024}MB)"
+            f"(حداکثر {MAX_TOTAL_SIZE//1024//1024}MB)"
         )
-        context.user_data["files"] = []
-        return ConversationHandler.END
+        user_files[user_id] = []
+        return
 
-    await update.message.reply_text(
-        "🔐 لطفاً رمز عبور برای فایل زیپ وارد کن (اگر قبلاً روی فایل مشخص کردی، همون استفاده میشه):"
+    # درخواست رمز عبور
+    await message.reply_text(
+        "🔐 لطفاً رمز عبور برای فایل زیپ وارد کن (اگر قبلاً روی فایل مشخص کردی، همون استفاده میشه):\n"
+        "❌ برای لغو /cancel را بزنید"
     )
-    return WAITING_FOR_PASSWORD
+    
+    # ذخیره وضعیت برای دریافت رمز
+    user_files[user_id].append({"waiting_for_password": True})
 
-async def zip_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_password = update.message.text.strip()
-    if not user_password:
-        await update.message.reply_text("❌ رمز عبور نمی‌تواند خالی باشد.")
-        return WAITING_FOR_PASSWORD
+# لغو عملیات
+@Client.on_message(filters.command("cancel"))
+async def cancel_zip(client: Client, message: Message):
+    if not is_user_allowed(message.from_user.id):
+        return await message.reply_text("❌ دسترسی denied.")
 
-    processing_msg = await update.message.reply_text("⏳ در حال ایجاد فایل زیپ...")
+    user_id = message.from_user.id
+    if user_id in user_files:
+        user_files[user_id] = []
+    
+    await message.reply_text("❌ عملیات لغو شد.")
+
+# پردازش زیپ
+@Client.on_message(filters.text & ~filters.command)
+async def process_zip_password(client: Client, message: Message):
+    if not is_user_allowed(message.from_user.id):
+        return
+
+    user_id = message.from_user.id
+    if user_id not in user_files or not user_files[user_id]:
+        return
+
+    # بررسی آیا منتظر رمز هستیم
+    if not any("waiting_for_password" in f for f in user_files[user_id]):
+        return
+
+    zip_password = message.text.strip()
+    if not zip_password:
+        return await message.reply_text("❌ رمز عبور نمی‌تواند خالی باشد.")
+
+    # حذف فلگ انتظار برای رمز
+    user_files[user_id] = [f for f in user_files[user_id] if "waiting_for_password" not in f]
+
+    processing_msg = await message.reply_text("⏳ در حال ایجاد فایل زیپ...")
     
     try:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -142,60 +229,59 @@ async def zip_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 compression=pyzipper.ZIP_DEFLATED,
                 encryption=pyzipper.WZ_AES,
             ) as zipf:
-                zipf.setpassword(user_password.encode())
+                zipf.setpassword(zip_password.encode())
 
-                total_files = len(context.user_data["files"])
+                total_files = len(user_files[user_id])
                 successful_files = 0
                 
-                for i, f in enumerate(context.user_data["files"], 1):
+                for i, file_info in enumerate(user_files[user_id], 1):
                     try:
-                        file_path = os.path.join(tmp_dir, f["file_name"])
-                        start_time = time.time()
+                        if "message" not in file_info:
+                            continue
+                            
+                        file_msg = file_info["message"]
+                        file_name = file_info["file_name"]
+                        file_password = file_info["password"] or zip_password
                         
-                        # به روز رسانی وضعیت دانلود
-                        await processing_msg.edit_text(
-                            f"📥 در حال دانلود: {f['file_name']}\n"
-                            f"📊 فایل {i} از {total_files}"
-                        )
+                        file_path = os.path.join(tmp_dir, file_name)
                         
-                        # دانلود فایل با پیشرفت
-                        file = await context.bot.get_file(f["file_id"])
+                        # تنظیم زمان شروع برای پیشرفت
+                        progress_callback.start_time = time.time()
                         
-                        # ایجاد تابع callback برای پیشرفت
-                        async def download_progress(current, total):
-                            await progress_callback(current, total, start_time, f["file_name"], processing_msg)
+                        # دانلود فایل
+                        await processing_msg.edit_text(f"📥 در حال دانلود: {file_name}\n📊 فایل {i} از {total_files}")
                         
-                        await file.download_to_drive(
+                        def download_progress(current, total):
+                            asyncio.create_task(
+                                progress_callback(current, total, message, file_name, "دانلود")
+                            )
+                        
+                        await client.download_media(
+                            file_msg,
                             file_path,
-                            read_timeout=60,
-                            write_timeout=60,
-                            connect_timeout=60
+                            progress=download_progress
                         )
                         
-                        # بررسی موفقیت آمیز بودن دانلود
+                        # افزودن به زیپ
                         if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
-                            zip_password = f["password"] or user_password
-                            if zip_password:
-                                zipf.setpassword(zip_password.encode())
-
-                            zipf.write(file_path, f["file_name"])
+                            if file_password:
+                                zipf.setpassword(file_password.encode())
+                            
+                            zipf.write(file_path, file_name)
                             successful_files += 1
                             
-                            percent_total = int((i / total_files) * 100)
-                            bar_total = get_progress_bar(percent_total)
-                            
                             await processing_msg.edit_text(
-                                f"✅ فایل '{f['file_name']}' اضافه شد.\n"
-                                f"📊 پیشرفت کل: {bar_total} ({i}/{total_files} فایل)"
+                                f"✅ فایل '{file_name}' اضافه شد.\n"
+                                f"📊 پیشرفت کل: {i}/{total_files} فایل"
                             )
                         else:
-                            logger.error(f"Download failed for file: {f['file_name']}")
+                            logger.error(f"Download failed for file: {file_name}")
                             continue
                             
                     except Exception as e:
-                        logger.error(f"Error processing file {f['file_name']}: {e}")
+                        logger.error(f"Error processing file {file_name}: {e}")
                         await processing_msg.edit_text(
-                            f"❌ خطا در پردازش فایل: {f['file_name']}\n"
+                            f"❌ خطا در پردازش فایل: {file_name}\n"
                             f"📊 ادامه پردازش فایل‌های دیگر..."
                         )
                         continue
@@ -208,109 +294,69 @@ async def zip_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             pass
 
                 if successful_files == 0:
-                    await update.message.reply_text("❌ هیچ فایلی موفقیت آمیز پردازش نشد.")
-                    return ConversationHandler.END
+                    await message.reply_text("❌ هیچ فایلی موفقیت آمیز پردازش نشد.")
+                    return
 
-                # ارسال فایل زیپ شده
+                # آپلود فایل زیپ شده
                 await processing_msg.edit_text("📤 در حال ارسال فایل زیپ...")
                 
-                await update.message.reply_document(
-                    InputFile(zip_path, filename=zip_file_name), 
-                    caption=f"✅ فایل زیپ آماده شد!\n🔐 رمز: {user_password}\n"
-                           f"📦 تعداد فایل‌های موفق: {successful_files}/{total_files}"
+                def upload_progress(current, total):
+                    asyncio.create_task(
+                        progress_callback(current, total, message, zip_file_name, "آپلود")
+                    )
+                
+                await client.send_document(
+                    message.chat.id,
+                    zip_path,
+                    caption=(
+                        f"✅ فایل زیپ آماده شد!\n"
+                        f"🔐 رمز: {zip_password}\n"
+                        f"📦 تعداد فایل‌های موفق: {successful_files}/{total_files}"
+                    ),
+                    progress=upload_progress
                 )
+                
                 logger.info("Zip file sent successfully")
 
     except Exception as e:
         logger.error(f"Error in zip process: {e}", exc_info=True)
-        await update.message.reply_text("❌ خطایی در پردازش فایل‌ها رخ داد.")
+        await message.reply_text("❌ خطایی در پردازش فایل‌ها رخ داد.")
     
     finally:
         # پاک کردن فایل‌های ذخیره شده
-        if "files" in context.user_data:
-            context.user_data["files"] = []
+        if user_id in user_files:
+            user_files[user_id] = []
         
         try:
             await processing_msg.delete()
-        except Exception as e:
-            logger.warning(f"Could not delete processing message: {e}")
+        except:
+            pass
 
-    return ConversationHandler.END
-
-async def cancel_zip(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ عملیات زیپ لغو شد.")
-    return ConversationHandler.END
-
-async def clear_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if "files" in context.user_data and context.user_data["files"]:
-        count = len(context.user_data["files"])
-        context.user_data["files"] = []
-        await update.message.reply_text(f"✅ {count} فایل ذخیره شده پاک شدند.")
-    else:
-        await update.message.reply_text("📭 هیچ فایلی برای پاک کردن وجود ندارد.")
-
-async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if "files" in context.user_data and context.user_data["files"]:
-        files_list = "\n".join([f"📄 {f['file_name']} ({f['file_size']//1024//1024}MB)" 
-                              for f in context.user_data["files"]])
-        total_size = sum(f["file_size"] for f in context.user_data["files"]) // 1024 // 1024
-        await update.message.reply_text(
-            f"📋 فایل‌های ذخیره شده:\n{files_list}\n\n"
-            f"📦 حجم کل: {total_size}MB\n"
-            f"🔢 تعداد: {len(context.user_data['files'])} فایل"
-        )
-    else:
-        await update.message.reply_text("📭 هیچ فایلی ذخیره نشده است.")
-
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.error("Exception while handling an update:", exc_info=True)
+async def main():
+    """تابع اصلی برای راه‌اندازی کلاینت"""
     try:
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="❌ خطایی رخ داد. لطفاً دوباره تلاش کنید."
+        app = Client(
+            "user_bot",
+            api_id=API_ID,
+            api_hash=API_HASH,
+            session_string=SESSION_STRING,
+            in_memory=True
         )
-    except:
-        pass
-
-# ===== ران اصلی =====
-def main():
-    try:
-        app = Application.builder().token(BOT_TOKEN).build()
         
-        # اضافه کردن error handler
-        app.add_error_handler(error_handler)
-
-        conv_handler = ConversationHandler(
-            entry_points=[CommandHandler("zip", ask_password)],
-            states={
-                WAITING_FOR_PASSWORD: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, zip_files)
-                ]
-            },
-            fallbacks=[CommandHandler("cancel", cancel_zip)],
-        )
-
-        app.add_handler(conv_handler)
-        app.add_handler(CommandHandler("start", start))
-        app.add_handler(CommandHandler("clear", clear_files))
-        app.add_handler(CommandHandler("list", list_files))
-        app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
-
-        logger.info("Bot is starting on Render with polling...")
+        logger.info("Starting user bot...")
+        await app.start()
         
-        # استفاده از polling
-        app.run_polling(
-            drop_pending_updates=True,
-            allowed_updates=Update.ALL_TYPES,
-            pool_timeout=30,
-            connect_timeout=30,
-            read_timeout=30,
-            write_timeout=30
-        )
+        me = await app.get_me()
+        logger.info(f"Logged in as: {me.first_name} (@{me.username})")
+        
+        # نگه داشتن بات فعال
+        await asyncio.Event().wait()
         
     except Exception as e:
         logger.error(f"Failed to start bot: {e}", exc_info=True)
-        sys.exit(1)
+    finally:
+        if 'app' in locals():
+            await app.stop()
 
-if name == "main":
-    main()
+if __name__ == "__main__":
+    asyncio.run(main())
