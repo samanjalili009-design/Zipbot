@@ -7,8 +7,6 @@ import logging
 import sys
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message
-import socket
-from threading import Thread
 
 # ===== تنظیمات =====
 API_ID = 1867911
@@ -37,19 +35,6 @@ def get_progress_bar(percent: int, length: int = 20):
     filled_length = int(length * percent // 100)
     bar = '■' * filled_length + '□' * (length - filled_length)
     return f"[{bar}] {percent}%"
-
-# ===== ایجاد پورت برای Render =====
-def create_port():
-    """ایجاد یک پورت ساده برای Render"""
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.bind(('0.0.0.0', int(os.environ.get('PORT', 10000))))
-        sock.listen(1)
-        print(f"✅ Port {os.environ.get('PORT', 10000)} is open")
-        return sock
-    except Exception as e:
-        print(f"Port error: {e}")
-        return None
 
 # ===== دستورات ربات =====
 @Client.on_message(filters.command("start"))
@@ -313,9 +298,6 @@ async def process_zip_password(client: Client, message: Message):
 async def main():
     """تابع اصلی"""
     try:
-        # ایجاد پورت برای Render
-        port_socket = create_port()
-        
         app = Client(
             "user_bot",
             api_id=API_ID,
@@ -337,6 +319,7 @@ async def main():
         except Exception as e:
             logger.warning(f"Could not send ready message: {e}")
         
+        # نگه داشتن ربات فعال
         await idle()
         
     except Exception as e:
@@ -344,8 +327,6 @@ async def main():
     finally:
         if 'app' in locals():
             await app.stop()
-        if 'port_socket' in locals() and port_socket:
-            port_socket.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
