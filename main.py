@@ -18,7 +18,7 @@ from telegram.ext import (
 # ===== تنظیمات =====
 BOT_TOKEN = "8145993181:AAFK7PeFs_9VsHqaP3iKagj9lWTNJXKpgjk"
 ACCOUNT_HASH = "f9e86b274826212a2712b18754fabc47"
-ALLOWED_USER_ID = 1867911
+ALLOWED_USER_ID = 417536686
 MAX_FILE_SIZE = 2097152000  # 2GB پیش‌فرض
 
 # Userbot (برای آپلود به حساب خودتان)
