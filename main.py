@@ -21,20 +21,39 @@ ACCOUNT_HASH = "f9e86b274826212a2712b18754fabc47"
 ALLOWED_USER_ID = 417536686
 MAX_FILE_SIZE = 2097152000  # 2GB پیش‌فرض
 
-# Userbot (برای آپلود به حساب خودتان)
-API_ID = 1867911  # می‌تونه همون آیدی باشه یا از my.telegram.org گرفته شود
+# Userbot
+API_ID = 1867911
 API_HASH = "f9e86b274826212a2712b18754fabc47"
 userbot = Client("userbot_session", api_id=API_ID, api_hash=API_HASH)
 
-# حالت گفتگو
 WAITING_FOR_PASSWORD = 1
 
-# لاگ
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def is_user_allowed(user_id: int) -> bool:
     return user_id == ALLOWED_USER_ID
+
+# ===== نوار پیشرفت =====
+def get_progress_bar(percent: int, length: int = 20):
+    filled_length = int(length * percent // 100)
+    bar = '■' * filled_length + '□' * (length - filled_length)
+    return f"[{bar}] {percent}%"
+
+# ===== پیشرفت دانلود =====
+async def progress_callback(current, total, msg, start_time, file_name):
+    percent = int(current * 100 / total)
+    elapsed = time.time() - start_time
+    speed = current / elapsed / 1024  # KB/s
+    try:
+        bar = get_progress_bar(percent)
+        await msg.edit_text(
+            f"📂 فایل: {file_name}\n"
+            f"📊 {bar} ({current//1024//1024}/{total//1024//1024} MB)\n"
+            f"💾 سرعت: {int(speed)} KB/s"
+        )
+    except:
+        pass
 
 # ===== دستورات ربات =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -67,8 +86,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["files"].append({"file_id": file_id, "file_name": doc.file_name, "password": password})
     await update.message.reply_text(
-        f"✅ فایل '{doc.file_name}' ذخیره شد.\n"
-        f"📝 برای زیپ کردن همه فایل‌ها /zip را بزنید"
+        f"✅ فایل '{doc.file_name}' ذخیره شد.\n📝 برای زیپ کردن همه فایل‌ها /zip را بزنید"
     )
 
 async def ask_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -106,24 +124,38 @@ async def zip_files_with_userbot(update: Update, context: ContextTypes.DEFAULT_T
             zipf.setpassword(user_password.encode())
 
             async with userbot:
+                total_files = len(context.user_data["files"])
                 for i, f in enumerate(context.user_data["files"], 1):
                     try:
                         file_path = os.path.join(tmp_dir, f["file_name"])
-                        await userbot.download_media(f["file_id"], file_path)
+                        start_time = time.time()
+                        # دانلود با پیشرفت
+                        await userbot.download_media(
+                            f["file_id"],
+                            file_path,
+                            progress=progress_callback,
+                            progress_args=(processing_msg, start_time, f["file_name"])
+                        )
+
                         zip_password = f["password"] or user_password
                         if zip_password:
                             zipf.setpassword(zip_password.encode())
+
                         zipf.write(file_path, f["file_name"])
-                        if i % 2 == 0:
-                            try:
-                                await processing_msg.edit_text(f"⏳ در حال پردازش... ({i}/{len(context.user_data['files'])})")
-                            except:
-                                pass
+
+                        percent_total = int((i / total_files) * 100)
+                        bar_total = get_progress_bar(percent_total)
+                        try:
+                            await processing_msg.edit_text(
+                                f"📦 فایل '{f['file_name']}' اضافه شد.\n"
+                                f"📊 پیشرفت کل: {bar_total} ({i}/{total_files} فایل)"
+                            )
+                        except:
+                            pass
                     except Exception as e:
                         logger.error(f"Error processing file {f['file_name']}: {e}")
                         continue
 
-        # ارسال فایل زیپ فقط از طریق Userbot
         await update.message.reply_document(InputFile(zip_path), caption=f"✅ فایل زیپ آماده شد!\n🔐 رمز: {user_password}")
 
     context.user_data["files"] = []
