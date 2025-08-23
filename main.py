@@ -24,7 +24,10 @@ MAX_FILE_SIZE = 2097152000  # 2GB پیش‌فرض
 
 WAITING_FOR_PASSWORD = 1
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 def is_user_allowed(user_id: int) -> bool:
@@ -40,7 +43,11 @@ def get_progress_bar(percent: int, length: int = 20):
 async def progress_callback(current, total, msg, start_time, file_name):
     percent = int(current * 100 / total)
     elapsed = time.time() - start_time
-    speed = current / elapsed / 1024  # KB/s
+    if elapsed > 0:
+        speed = current / elapsed / 1024  # KB/s
+    else:
+        speed = 0
+    
     try:
         bar = get_progress_bar(percent)
         await msg.edit_text(
@@ -48,8 +55,8 @@ async def progress_callback(current, total, msg, start_time, file_name):
             f"📊 {bar} ({current//1024//1024}/{total//1024//1024} MB)\n"
             f"💾 سرعت: {int(speed)} KB/s"
         )
-    except:
-        pass
+    except Exception as e:
+        logger.warning(f"Could not update progress: {e}")
 
 # ===== دستورات ربات =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -80,7 +87,12 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "files" not in context.user_data:
         context.user_data["files"] = []
 
-    context.user_data["files"].append({"file_id": file_id, "file_name": doc.file_name, "password": password})
+    context.user_data["files"].append({
+        "file_id": file_id, 
+        "file_name": doc.file_name, 
+        "password": password
+    })
+    
     await update.message.reply_text(
         f"✅ فایل '{doc.file_name}' ذخیره شد.\n📝 برای زیپ کردن همه فایل‌ها /zip را بزنید"
     )
@@ -106,16 +118,21 @@ async def zip_files_with_userbot(update: Update, context: ContextTypes.DEFAULT_T
         return WAITING_FOR_PASSWORD
 
     processing_msg = await update.message.reply_text("⏳ در حال ایجاد فایل زیپ...")
-
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        zip_file_name = f"archive_{int(time.time())}.zip"
-        zip_path = os.path.join(tmp_dir, zip_file_name)
+    
+    userbot = None
+    try:
+        userbot = Client(
+            "userbot_session", 
+            api_id=API_ID, 
+            api_hash=API_HASH,
+            in_memory=True  # جلوگیری از مشکلات فایل session
+        )
         
-        # ایجاد و راه‌اندازی userbot
-        userbot = Client("userbot_session", api_id=API_ID, api_hash=API_HASH)
+        await userbot.start()
         
-        try:
-            await userbot.start()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            zip_file_name = f"archive_{int(time.time())}.zip"
+            zip_path = os.path.join(tmp_dir, zip_file_name)
             
             with pyzipper.AESZipFile(
                 zip_path,
@@ -147,30 +164,43 @@ async def zip_files_with_userbot(update: Update, context: ContextTypes.DEFAULT_T
 
                         percent_total = int((i / total_files) * 100)
                         bar_total = get_progress_bar(percent_total)
-                        try:
-                            await processing_msg.edit_text(
-                                f"📦 فایل '{f['file_name']}' اضافه شد.\n"
-                                f"📊 پیشرفت کل: {bar_total} ({i}/{total_files} فایل)"
-                            )
-                        except:
-                            pass
+                        
+                        await processing_msg.edit_text(
+                            f"📦 فایل '{f['file_name']}' اضافه شد.\n"
+                            f"📊 پیشرفت کل: {bar_total} ({i}/{total_files} فایل)"
+                        )
+                        
                     except Exception as e:
                         logger.error(f"Error processing file {f['file_name']}: {e}")
                         continue
 
-            await update.message.reply_document(InputFile(zip_path), caption=f"✅ فایل زیپ آماده شد!\n🔐 رمز: {user_password}")
+            # ارسال فایل زیپ شده
+            await update.message.reply_document(
+                InputFile(zip_path), 
+                caption=f"✅ فایل زیپ آماده شد!\n🔐 رمز: {user_password}"
+            )
 
-        except Exception as e:
-            logger.error(f"Error in zip process: {e}")
-            await update.message.reply_text("❌ خطایی در پردازش فایل‌ها رخ داد.")
-        finally:
-            await userbot.stop()
+    except Exception as e:
+        logger.error(f"Error in zip process: {e}")
+        await update.message.reply_text("❌ خطایی در پردازش فایل‌ها رخ داد.")
+    
+    finally:
+        # مدیریت صحیح بستن userbot
+        if userbot:
+            try:
+                if await userbot.is_connected():
+                    await userbot.stop()
+            except Exception as e:
+                logger.warning(f"Error stopping userbot: {e}")
 
-    context.user_data["files"] = []
+    # پاک کردن فایل‌های ذخیره شده
+    if "files" in context.user_data:
+        context.user_data["files"] = []
+    
     try:
         await processing_msg.delete()
-    except:
-        pass
+    except Exception as e:
+        logger.warning(f"Could not delete processing message: {e}")
 
     return ConversationHandler.END
 
@@ -205,7 +235,11 @@ def main():
 
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("zip", ask_password)],
-        states={WAITING_FOR_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, zip_files_with_userbot)]},
+        states={
+            WAITING_FOR_PASSWORD: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, zip_files_with_userbot)
+            ]
+        },
         fallbacks=[CommandHandler("cancel", cancel_zip)],
     )
 
@@ -214,7 +248,8 @@ def main():
     app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
     app.add_handler(CommandHandler("clear", clear_files))
 
-    app.run_polling()
+    logger.info("Bot is starting...")
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
-    main()  # بدون asyncio.run()
+    main()
