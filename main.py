@@ -12,7 +12,7 @@ from pyrogram.errors import RPCError
 # ===== تنظیمات =====
 API_ID = 1867911
 API_HASH = "f9e86b274826212a2712b18754fabc47"
-SESSION_STRING = "1BJWap1sBu090MF0_cVWIe-T4J5v18SuER7_K9izg1Tu6-krlOFLai0LVbGGBPTfqHCpgN7ul8sUp5BiX2ra7rkrh0mC_UF4hr93vJ4JA5RS2AbMH_mB4VuIi7wyu1v4ngBBLkZHtzQsY9SiICzynZdK7CnzrIERQJNrfXU7oG_6mA6JGFCO8jQkDzlR28LOhi90YhYk1A0yPRWFk5ItKAdyfbKBc6wGyhB9h6LnsCbdY-XhPoAlki2K4kH00pGGzM4i0j73UhzEqDnVZjJQoqtciekW5Ceyu02PsOtuoy8oNpXGaj49pNq5BxMyGNCm3TjqxlA3iXoZJe3x-JEZQ9xf1Zl5H7Vk="
+SESSION_STRING = "1BJWap1sBu090MF0_cVWIe-T4J5v18SuER7_K9izg1Tu6-krlOFLai0LVbGGBPTfqHCpgN7ul8sUp5BiX2ra7rkrh0mC_UF4hr93vJ4JA5RS2AbMH_mB4VuIi7wyu1v4ngBBLkZHtzQsY9SiICzynZdK7CnzrIERQJNrfXU7oG_6mA6JGFCO8jQkDzlR28LOhi90YhYk1A0yPRWFk5ItKAdyfbKBc6wGyhB9h6LnsCbdY-XhPoAlki2K4kH00pGGzM4i0j73UhzEqDnVZjJQoqtciekW5Ceyu02PsOtuoy8oNpXGaj49pNq5BxMyGNCm3TjqxlA3iXoZJe3x-JEZQ9xf1Zl5H7Vk="  # این رو با session جدید جایگزین کن
 ALLOWED_USER_ID = 417536686
 MAX_FILE_SIZE = 2097152000  # 2GB
 MAX_TOTAL_SIZE = 2097152000  # 2GB برای کل فایل‌ها
@@ -48,25 +48,16 @@ async def send_progress(message: Message, current: int, total: int, file_name: s
             f"🔄 عملیات: {operation}"
         )
         
-        # استفاده از message ID برای مدیریت پیام‌های پیشرفت
-        progress_key = f"{message.chat.id}_{file_name}"
-        
-        if progress_key in send_progress.messages:
+        if hasattr(send_progress, 'last_message'):
             try:
-                await send_progress.messages[progress_key].edit_text(text)
+                await send_progress.last_message.edit_text(text)
             except:
-                # اگر پیام حذف شده، جدید ایجاد کن
-                new_msg = await message.reply_text(text)
-                send_progress.messages[progress_key] = new_msg
+                send_progress.last_message = await message.reply_text(text)
         else:
-            new_msg = await message.reply_text(text)
-            send_progress.messages[progress_key] = new_msg
+            send_progress.last_message = await message.reply_text(text)
             
     except Exception as e:
         logger.warning(f"Could not update progress: {e}")
-
-# دیکشنری برای ذخیره پیام‌های پیشرفت
-send_progress.messages = {}
 
 # فیلتر برای تشخیص متن غیر از دستورات
 def non_command_filter(_, __, message: Message):
@@ -263,15 +254,9 @@ async def process_zip_password(client: Client, message: Message):
                         # دانلود فایل
                         await processing_msg.edit_text(f"📥 در حال دانلود: {file_name}\n📊 فایل {i} از {total_files}")
                         
-                        def download_progress(current, total):
-                            asyncio.create_task(
-                                send_progress(message, current, total, file_name, "دانلود")
-                            )
-                        
                         await client.download_media(
                             file_msg,
-                            file_path,
-                            progress=download_progress
+                            file_path
                         )
                         
                         # افزودن به زیپ
@@ -312,11 +297,6 @@ async def process_zip_password(client: Client, message: Message):
                 # آپلود فایل زیپ شده
                 await processing_msg.edit_text("📤 در حال ارسال فایل زیپ...")
                 
-                def upload_progress(current, total):
-                    asyncio.create_task(
-                        send_progress(message, current, total, zip_file_name, "آپلود")
-                    )
-                
                 await client.send_document(
                     message.chat.id,
                     zip_path,
@@ -324,8 +304,7 @@ async def process_zip_password(client: Client, message: Message):
                         f"✅ فایل زیپ آماده شد!\n"
                         f"🔐 رمز: {zip_password}\n"
                         f"📦 تعداد فایل‌های موفق: {successful_files}/{total_files}"
-                    ),
-                    progress=upload_progress
+                    )
                 )
                 
                 logger.info("Zip file sent successfully")
@@ -338,20 +317,6 @@ async def process_zip_password(client: Client, message: Message):
         # پاک کردن فایل‌های ذخیره شده
         if user_id in user_files:
             user_files[user_id] = []
-        
-        # پاکسازی پیام‌های پیشرفت
-        for key in list(send_progress.messages.keys()):
-            if str(user_id) in key:
-                try:
-                    await send_progress.messages[key].delete()
-                except:
-                    pass
-                send_progress.messages.pop(key, None)
-        
-        try:
-            await processing_msg.delete()
-        except:
-            pass
 
 async def main():
     """تابع اصلی برای راه‌اندازی کلاینت"""
@@ -375,7 +340,6 @@ async def main():
         
     except Exception as e:
         logger.error(f"Failed to start bot: {e}", exc_info=True)
-        raise
     finally:
         if 'app' in locals():
             await app.stop()
