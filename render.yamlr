@@ -1,16 +1,10 @@
 services:
-  - type: web
-    name: telegram-zip-bot
+  - type: worker
+    name: telegram-user-zip-bot
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python main.py
     envVars:
-      - key: TELEGRAM_BOT_TOKEN
-        value: 8145993181:AAFK7PeFs_9VsHqaP3iKagj9lWTNJXKpgjk
-      - key: ACCOUNT_HASH
-        value: f9e86b274826212a2712b18754fabc47
-      - key: ALLOWED_USER_ID
-        value: 1867911
-      - key: MAX_FILE_SIZE
-        value: 2097152000
+      - key: PYTHON_VERSION
+        value: 3.11.0
