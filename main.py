@@ -6,9 +6,9 @@ import pyzipper
 import logging
 import sys
 from pyrogram import Client, filters
-from pyrogram.types import Message, Document
+from pyrogram.types import Message
 from pyrogram.errors import RPCError
-from pyrogram.session import StringSession
+from pyrogram import enums
 
 # ===== تنظیمات =====
 API_ID = 1867911
@@ -350,7 +350,7 @@ async def main():
         logger.info(f"Logged in as: {me.first_name} (@{me.username})")
         
         # نگه داشتن بات فعال
-        await asyncio.Event().wait()
+        await idle()
         
     except Exception as e:
         logger.error(f"Failed to start bot: {e}", exc_info=True)
