@@ -5,10 +5,9 @@ import time
 import pyzipper
 import logging
 import sys
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from pyrogram.types import Message
 from pyrogram.errors import RPCError
-from pyrogram import enums
 
 # ===== تنظیمات =====
 API_ID = 1867911
@@ -28,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 # دیکشنری برای ذخیره فایل‌های کاربران
 user_files = {}
+waiting_for_password = {}
 
 def is_user_allowed(user_id: int) -> bool:
     return user_id == ALLOWED_USER_ID
@@ -37,31 +37,36 @@ def get_progress_bar(percent: int, length: int = 20):
     bar = '■' * filled_length + '□' * (length - filled_length)
     return f"[{bar}] {percent}%"
 
-async def progress_callback(current, total, message: Message, file_name: str, operation: str):
+async def send_progress(message: Message, current: int, total: int, file_name: str, operation: str):
     try:
         percent = int(current * 100 / total) if total > 0 else 0
-        elapsed = time.time() - getattr(progress_callback, 'start_time', time.time())
-        speed = current / elapsed / 1024 if elapsed > 0 else 0
-        
         bar = get_progress_bar(percent)
         
         text = (
             f"📂 فایل: {file_name}\n"
             f"📊 {bar} ({current//1024//1024}/{total//1024//1024} MB)\n"
-            f"💾 سرعت: {int(speed)} KB/s\n"
             f"🔄 عملیات: {operation}"
         )
         
-        if hasattr(progress_callback, 'last_message'):
+        # استفاده از message ID برای مدیریت پیام‌های پیشرفت
+        progress_key = f"{message.chat.id}_{file_name}"
+        
+        if progress_key in send_progress.messages:
             try:
-                await progress_callback.last_message.edit_text(text)
+                await send_progress.messages[progress_key].edit_text(text)
             except:
-                progress_callback.last_message = await message.reply_text(text)
+                # اگر پیام حذف شده، جدید ایجاد کن
+                new_msg = await message.reply_text(text)
+                send_progress.messages[progress_key] = new_msg
         else:
-            progress_callback.last_message = await message.reply_text(text)
+            new_msg = await message.reply_text(text)
+            send_progress.messages[progress_key] = new_msg
             
     except Exception as e:
         logger.warning(f"Could not update progress: {e}")
+
+# دیکشنری برای ذخیره پیام‌های پیشرفت
+send_progress.messages = {}
 
 # دستور استارت
 @Client.on_message(filters.command("start"))
@@ -150,6 +155,7 @@ async def clear_files(client: Client, message: Message):
     if user_id in user_files and user_files[user_id]:
         count = len(user_files[user_id])
         user_files[user_id] = []
+        waiting_for_password.pop(user_id, None)
         await message.reply_text(f"✅ {count} فایل ذخیره شده پاک شدند.")
     else:
         await message.reply_text("📭 هیچ فایلی برای پاک کردن وجود ندارد.")
@@ -180,8 +186,8 @@ async def start_zip(client: Client, message: Message):
         "❌ برای لغو /cancel را بزنید"
     )
     
-    # ذخیره وضعیت برای دریافت رمز
-    user_files[user_id].append({"waiting_for_password": True})
+    # علامت‌گذاری برای انتظار رمز
+    waiting_for_password[user_id] = True
 
 # لغو عملیات
 @Client.on_message(filters.command("cancel"))
@@ -192,6 +198,8 @@ async def cancel_zip(client: Client, message: Message):
     user_id = message.from_user.id
     if user_id in user_files:
         user_files[user_id] = []
+    if user_id in waiting_for_password:
+        waiting_for_password.pop(user_id)
     
     await message.reply_text("❌ عملیات لغو شد.")
 
@@ -202,11 +210,9 @@ async def process_zip_password(client: Client, message: Message):
         return
 
     user_id = message.from_user.id
-    if user_id not in user_files or not user_files[user_id]:
-        return
-
+    
     # بررسی آیا منتظر رمز هستیم
-    if not any("waiting_for_password" in f for f in user_files[user_id]):
+    if user_id not in waiting_for_password or not waiting_for_password[user_id]:
         return
 
     zip_password = message.text.strip()
@@ -214,7 +220,7 @@ async def process_zip_password(client: Client, message: Message):
         return await message.reply_text("❌ رمز عبور نمی‌تواند خالی باشد.")
 
     # حذف فلگ انتظار برای رمز
-    user_files[user_id] = [f for f in user_files[user_id] if "waiting_for_password" not in f]
+    waiting_for_password.pop(user_id, None)
 
     processing_msg = await message.reply_text("⏳ در حال ایجاد فایل زیپ...")
     
@@ -245,15 +251,12 @@ async def process_zip_password(client: Client, message: Message):
                         
                         file_path = os.path.join(tmp_dir, file_name)
                         
-                        # تنظیم زمان شروع برای پیشرفت
-                        progress_callback.start_time = time.time()
-                        
                         # دانلود فایل
                         await processing_msg.edit_text(f"📥 در حال دانلود: {file_name}\n📊 فایل {i} از {total_files}")
                         
                         def download_progress(current, total):
                             asyncio.create_task(
-                                progress_callback(current, total, message, file_name, "دانلود")
+                                send_progress(message, current, total, file_name, "دانلود")
                             )
                         
                         await client.download_media(
@@ -302,7 +305,7 @@ async def process_zip_password(client: Client, message: Message):
                 
                 def upload_progress(current, total):
                     asyncio.create_task(
-                        progress_callback(current, total, message, zip_file_name, "آپلود")
+                        send_progress(message, current, total, zip_file_name, "آپلود")
                     )
                 
                 await client.send_document(
@@ -326,6 +329,15 @@ async def process_zip_password(client: Client, message: Message):
         # پاک کردن فایل‌های ذخیره شده
         if user_id in user_files:
             user_files[user_id] = []
+        
+        # پاکسازی پیام‌های پیشرفت
+        for key in list(send_progress.messages.keys()):
+            if str(user_id) in key:
+                try:
+                    await send_progress.messages[key].delete()
+                except:
+                    pass
+                send_progress.messages.pop(key, None)
         
         try:
             await processing_msg.delete()
@@ -354,6 +366,7 @@ async def main():
         
     except Exception as e:
         logger.error(f"Failed to start bot: {e}", exc_info=True)
+        raise
     finally:
         if 'app' in locals():
             await app.stop()
