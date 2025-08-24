@@ -5,6 +5,8 @@ import pyzipper
 import logging
 import sys
 import asyncio
+import random
+import string
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from flask import Flask
@@ -13,18 +15,13 @@ import threading
 # ===== تنظیمات =====
 API_ID = 1867911
 API_HASH = "f9e86b274826212a2712b18754fabc47"
-SESSION_STRING = "BAAcgIcAE08jkqQKFlTNOVn9T0SWvIjmGYv05OSBdjpq72ZAn4V7DEIYjiEQktbWKighncDdhRpNfHpLWECNro7vLFTnznTnHM_2xmsDGlrQ0jm8RZQRWHw7ATYg5ZIe9o7LG2ecqykOsxgrmeXZhEP4Szve_h7Djs2WZqBTx3raZgzLQpwMsl_7zD2jTmJTxZC6fZ6c3JnftfVSbqpuiHyUzxJqMcHXwNdlcp7arz5BvXpbfi8lfpqFafhK3Z1UAWwN0ip0ktMP7mAehNRFQi6bGpsd28v7UhMcjXCFKjl1O68KHmT8BIaM1hAo9t-VhkNCAb3irC55yfhHULqMHExDGp2d8gAAAAAY4xquAA"
 ALLOWED_USER_ID = 417536686
 MAX_FILE_SIZE = 2097152000  # 2GB
 MAX_TOTAL_SIZE = 2097152000  # 2GB
 
-# ===== محدودیت چت =====
-# به‌صورت پیش‌فرض فقط در Saved Messages کار می‌کند.
-# اگر می‌خواهی در PM یک ربات مشخص هم کار کند، یوزرنیم‌اش را اینجا اضافه کن (بدون @)
-ALLOWED_CHAT_USERNAMES = set()  # مثلا: {"MyZipBot"}
-ALLOWED_CHAT_IDS = set()        # اگه چت/گروه خاصی مد نظرته، آیدی عددیش را اینجا اضافه کن
-
-SELF_ID = 0  # بعد از start پر می‌شود
+# ایجاد شناسه منحصر به فرد برای هر ربات
+BOT_ID = ''.join(random.choices(string.ascii_letters + string.digits, k=12))
+SESSION_STRING = f"BAAcgIcAE08jkqQKFlTNOVn9T0SWvIjmGYv05OSBdjpq72ZAn4V7DEIYjiEQktbWKighncDdhRpNfHpLWECNro7vLFTnznTnHM_2xmsDGlrQ0jm8RZQRWHw7ATYg5ZIe9o7LG2ecqykOsxgrmeXZhEP4Szve_h7Djs2WZqBTx3raZgzLQpwMsl_7zD2jTmJTxZC6fZ6c3JnftfVSbqpuiHyUzxJqMcHXwNdlcp7arz5BvXpbfi8lfpqFafhK3Z1UAWwN0ip0ktMP7mAehNRFQi6bGpsd28v7UhMcjXCFKjl1O68KHmT8BIaM1hAo9t-VhkNCAb3irC55yfhHULqMHExDGp2d8gAAAAAY4xquAA_{BOT_ID}"
 
 # ===== لاگ =====
 logging.basicConfig(
@@ -47,29 +44,17 @@ zip_password_storage = {}
 def is_user_allowed(user_id: int) -> bool:
     return user_id == ALLOWED_USER_ID
 
-def is_chat_allowed(chat) -> bool:
-    # 1) فقط Saved Messages (chat.id == SELF_ID)
-    if chat.id == SELF_ID:
-        return True
-    # 2) چت‌هایی که به‌صورت عددی مجاز شدند
-    if chat.id in ALLOWED_CHAT_IDS:
-        return True
-    # 3) یوزرنیم‌های مجاز (برای PM یک ربات یا کانال)
-    uname = (chat.username or "").lower()
-    if uname and uname in {u.lower() for u in ALLOWED_CHAT_USERNAMES}:
-        return True
-    # در غیر این صورت مجاز نیست
-    return False
-
 async def progress_bar(current, total, message: Message, start_time, stage="دانلود"):
     now = time.time()
     diff = now - start_time
-    if diff == 0: diff = 1
+    if diff == 0: 
+        diff = 1
     percent = int(current * 100 / total)
     speed = current / diff
     eta = int((total - current) / speed) if speed > 0 else 0
     bar_filled = int(percent / 5)
     bar = "▓" * bar_filled + "░" * (20 - bar_filled)
+    
     text = f"""
 🚀 {stage} فایل...
 
@@ -78,17 +63,18 @@ async def progress_bar(current, total, message: Message, start_time, stage="دا
 📦 {current//1024//1024}MB / {total//1024//1024}MB
 ⚡️ سرعت: {round(speed/1024,2)} KB/s
 ⏳ زمان باقی‌مانده: {eta}s
-    """
-    try: await message.edit_text(text)
-    except: pass
+"""
+    try: 
+        await message.edit_text(text)
+    except: 
+        pass
 
 # ===== هندلرها =====
+@app.on_message(filters.command("start"))
 async def start(client, message):
-    # فقط از طرف خودت + فقط در چت مجاز
     if not is_user_allowed(message.from_user.id):
-        return
-    if not is_chat_allowed(message.chat):
-        return
+        return await message.reply_text("❌ دسترسی denied.")
+    
     await message.reply_text(
         "سلام 👋\nفایل‌تو بفرست تا برات زیپ کنم.\n"
         "💡 کپشن فایل = pass=رمز برای تعیین پسورد (اختیاری)\n"
@@ -97,71 +83,83 @@ async def start(client, message):
         "بعد از ارسال فایل‌ها دستور /zip رو بزن تا ابتدا پسورد و سپس اسم فایل نهایی را وارد کنی."
     )
 
+@app.on_message(filters.document)
 async def handle_file(client, message):
     if not is_user_allowed(message.from_user.id):
         return
-    if not is_chat_allowed(message.chat):
-        return
+    
     doc = message.document
     if not doc:
         return
+    
     file_name = doc.file_name or f"file_{message.id}"
     caption = message.caption or ""
     password = None
+    
     if "pass=" in caption:
-        password = caption.split("pass=",1)[1].split()[0].strip()
+        password = caption.split("pass=", 1)[1].split()[0].strip()
+    
     if doc.file_size > MAX_FILE_SIZE:
         return await message.reply_text(f"❌ حجم فایل بیش از حد مجاز است! ({MAX_FILE_SIZE//1024//1024}MB)")
+    
     user_id = message.from_user.id
-    if user_id not in user_files: user_files[user_id] = []
-    user_files[user_id].append({"message": message, "file_name": file_name, "password": password, "file_size": doc.file_size})
+    if user_id not in user_files:
+        user_files[user_id] = []
+    
+    user_files[user_id].append({
+        "message": message, 
+        "file_name": file_name, 
+        "password": password, 
+        "file_size": doc.file_size
+    })
+    
+    await message.reply_text(f"✅ فایل '{file_name}' ذخیره شد. تعداد فایل‌ها: {len(user_files[user_id])}")
 
+@app.on_message(filters.command("zip"))
 async def start_zip(client, message):
-    if not is_user_allowed(message.from_user.id):
+    if not is_user_allowed(message.from_user.id): 
         return
-    if not is_chat_allowed(message.chat):
-        return
+    
     user_id = message.from_user.id
     if user_id not in user_files or not user_files[user_id]:
         return await message.reply_text("❌ هیچ فایلی برای زیپ کردن وجود ندارد.")
+    
     total_size = sum(f["file_size"] for f in user_files[user_id])
     if total_size > MAX_TOTAL_SIZE:
         await message.reply_text(f"❌ حجم کل فایل‌ها بیش از حد مجاز است! ({MAX_TOTAL_SIZE//1024//1024}MB)")
         user_files[user_id] = []
         return
+    
     await message.reply_text("🔐 لطفاً رمز عبور برای فایل زیپ وارد کن:\n❌ برای لغو /cancel را بزنید")
     waiting_for_password[user_id] = True
 
+@app.on_message(filters.command("cancel"))
 async def cancel_zip(client, message):
-    if not is_user_allowed(message.from_user.id):
-        return
-    if not is_chat_allowed(message.chat):
-        return
     user_id = message.from_user.id
-    if user_id in user_files: user_files[user_id] = []
-    waiting_for_password.pop(user_id,None)
-    waiting_for_filename.pop(user_id,None)
-    zip_password_storage.pop(user_id,None)
+    if user_id in user_files: 
+        user_files[user_id] = []
+    waiting_for_password.pop(user_id, None)
+    waiting_for_filename.pop(user_id, None)
+    zip_password_storage.pop(user_id, None)
     await message.reply_text("❌ عملیات لغو شد.")
 
 def non_command_filter(_, __, message: Message):
     return message.text and not message.text.startswith('/')
+
 non_command = filters.create(non_command_filter)
 
+@app.on_message(filters.text & non_command)
 async def process_zip(client, message):
-    if not is_user_allowed(message.from_user.id):
-        return
-    if not is_chat_allowed(message.chat):
-        return
-
     user_id = message.from_user.id
+    
     # مرحله پسورد
     if user_id in waiting_for_password and waiting_for_password[user_id]:
         zip_password = message.text.strip()
         if not zip_password:
             return await message.reply_text("❌ رمز عبور نمی‌تواند خالی باشد.")
+        
         zip_password_storage[user_id] = zip_password
-        waiting_for_password.pop(user_id,None)
+        waiting_for_password.pop(user_id, None)
         waiting_for_filename[user_id] = True
         return await message.reply_text("📝 حالا اسم فایل زیپ نهایی را وارد کن (بدون .zip)")
     
@@ -170,86 +168,92 @@ async def process_zip(client, message):
         zip_name = message.text.strip()
         if not zip_name:
             return await message.reply_text("❌ اسم فایل نمی‌تواند خالی باشد.")
-        waiting_for_filename.pop(user_id,None)
+        
+        waiting_for_filename.pop(user_id, None)
         processing_msg = await message.reply_text("⏳ در حال ایجاد فایل زیپ...")
-        zip_password = zip_password_storage.pop(user_id,None)
+        zip_password = zip_password_storage.pop(user_id, None)
+        
         try:
             with tempfile.TemporaryDirectory() as tmp_dir:
                 zip_file_name = f"{zip_name}.zip"
                 zip_path = os.path.join(tmp_dir, zip_file_name)
-                with pyzipper.AESZipFile(zip_path,"w",compression=pyzipper.ZIP_DEFLATED,encryption=pyzipper.WZ_AES) as zipf:
+                
+                with pyzipper.AESZipFile(zip_path, "w", compression=pyzipper.ZIP_DEFLATED, encryption=pyzipper.WZ_AES) as zipf:
                     zipf.setpassword(zip_password.encode())
                     total_files = len(user_files[user_id])
-                    for i, finfo in enumerate(user_files[user_id],1):
+                    
+                    for i, finfo in enumerate(user_files[user_id], 1):
                         file_msg = finfo["message"]
                         file_name = finfo["file_name"]
-                        file_path = os.path.join(tmp_dir,file_name)
+                        file_path = os.path.join(tmp_dir, file_name)
+                        
                         start_time = time.time()
                         await client.download_media(
-                            file_msg,
-                            file_path,
-                            progress=progress_bar,
-                            progress_args=(processing_msg,start_time,"دانلود")
+                            file_msg, 
+                            file_path, 
+                            progress=progress_bar, 
+                            progress_args=(processing_msg, start_time, "دانلود")
                         )
-                        if os.path.exists(file_path) and os.path.getsize(file_path)>0:
-                            zipf.write(file_path,file_name)
-                        os.remove(file_path)
+                        
+                        if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+                            zipf.write(file_path, file_name)
+                            os.remove(file_path)
+                
+                # ارسال فایل زیپ شده
                 start_time = time.time()
                 await client.send_document(
                     message.chat.id,
                     zip_path,
                     caption=f"✅ فایل زیپ آماده شد!\n🔑 رمز: `{zip_password}`\n📦 تعداد فایل‌ها: {total_files}",
                     progress=progress_bar,
-                    progress_args=(processing_msg,start_time,"آپلود")
+                    progress_args=(processing_msg, start_time, "آپلود")
                 )
+                
+                await processing_msg.edit_text("✅ فایل زیپ با موفقیت ارسال شد!")
+                
         except Exception as e:
-            logger.error(f"Error in zip: {e}",exc_info=True)
-            await message.reply_text("❌ خطایی رخ داد.")
+            logger.error(f"Error in zip: {e}", exc_info=True)
+            await message.reply_text("❌ خطایی در ایجاد فایل زیپ رخ داد.")
         finally:
             user_files[user_id] = []
 
 # ===== تابع برای اجرای ربات =====
 async def run_bot():
     """تابعی که ربات را اجرا می‌کند"""
-    global app, SELF_ID
-    logger.info("Starting user bot...")
-    
+    global app
+    logger.info(f"Starting user bot with ID: {BOT_ID}...")
+
     app = Client(
-        "user_bot",
+        f"user_bot_{BOT_ID}",
         api_id=API_ID,
         api_hash=API_HASH,
         session_string=SESSION_STRING,
         in_memory=True
     )
     
-    # اضافه کردن هندلرها
-    app.on_message(filters.command("start"))(start)
-    app.on_message(filters.document)(handle_file)
-    app.on_message(filters.command("zip"))(start_zip)
-    app.on_message(filters.command("cancel"))(cancel_zip)
-    app.on_message(filters.text & non_command)(process_zip)
-    
     await app.start()
+    logger.info("Bot started successfully!")
+    
+    # نمایش اطلاعات ربات
     me = await app.get_me()
-    SELF_ID = me.id  # برای تشخیص Saved Messages
-    logger.info(f"Bot started as {me.first_name} ({SELF_ID}).")
+    logger.info(f"Bot is running as: {me.first_name} (@{me.username})")
     
     # منتظر ماندن تا ربات اجرا شود
     await asyncio.Event().wait()
 
+# ===== وب سرور Flask =====
+web_app = Flask(__name__)
+
+@web_app.route('/')
+def home():
+    return f"Bot {BOT_ID} is running", 200
+
+@web_app.route('/health')
+def health_check():
+    return f"Bot {BOT_ID} is healthy", 200
+
 # ===== اجرا =====
 if __name__ == "__main__":
-    # ایجاد وب سرور Flask
-    web_app = Flask(__name__)
-    
-    @web_app.route('/')
-    def home():
-        return "Bot is running", 200
-    
-    @web_app.route('/health')
-    def health_check():
-        return "Bot is running", 200
-    
     # اجرای ربات در یک thread جداگانه
     def start_bot():
         loop = asyncio.new_event_loop()
@@ -258,7 +262,9 @@ if __name__ == "__main__":
             loop.run_until_complete(run_bot())
         except Exception as e:
             logger.error(f"Bot error: {e}")
-    
+        finally:
+            loop.close()
+
     bot_thread = threading.Thread(target=start_bot, daemon=True)
     bot_thread.start()
     
