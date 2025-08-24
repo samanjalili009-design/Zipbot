@@ -13,7 +13,7 @@ import threading
 # ===== تنظیمات =====
 API_ID = 1867911
 API_HASH = "f9e86b274826212a2712b18754fabc47"
-SESSION_STRING = "BAAcgIcAE08jkqQKFlTNOVn9T0SWvIjmGYv05OSBdjpq72ZAn4V7DEIYjiEQktbWKighncDdhRpNfHpLWECNro7vLFTnznTnHM_2xmsDGlrQ0jm8RZQRWHw7ATYg5ZIe9o7LG2ecqykOsxgrmeXZhEP4Szve_h7Djs2WZqBTx3raZgzLQpwMsl_7zD2jTmJTxZC6fZ6c3JnftfVSbqpuiHyUzxJqMcHXwNdlcp7arz5BvXpbfi8lfpqFafhK3Z1UAWwN0ip0ktMP7mAehNRFQi6bGpsd28v7UhMcjXCFKjl1O68KHmT8BIaM1hAo9t-VhkNCAb3irC55yfhHULqMHExDGp2d8gAAAAAY4xquAA"
+SESSION_STRING = "BAAcgIcAHABwNKUs8BNA4PbOH3k5sCClUxn30ELuBYsvUUINEey2ngYfCnQnP-Ckxi9iaWV7Xe5LJ7O1x71tQDpBckFKGNecQmlPJFxupKqhHPmC2mXdrDHLSDo20Jn5lcNc1Hh-vv_sgo72-EGEV1TIbThKgXE53ncvudBNMaO6bKgFsKbs6HE8mIBlyNTsteQkSJ1-VQF32eA8m9DTNiDdwrO5D7YpEs-dImUTFLhMl744OwY_twzlB3-caCOH1AWhHkjKALpOxQ50ToCg9zZ2gBbKKXyWl3KTjhL7GHzNU0iDrpJLWSmdP4oqn9OU8pKxXhqj8rYqg6-6OKw9fyl1Jb7XngAAAAF--TK5AA"
 ALLOWED_USER_ID = 417536686
 MAX_FILE_SIZE = 2097152000  # 2GB
 MAX_TOTAL_SIZE = 2097152000  # 2GB
@@ -62,10 +62,6 @@ async def progress_bar(current, total, message: Message, start_time, stage="دا
 
 # ===== هندلرها =====
 async def start(client, message):
-    # فقط اگر پیام از طرف خود ربات نباشد پاسخ دهد
-    if message.from_user and message.from_user.is_self:
-        return
-        
     if not is_user_allowed(message.from_user.id):
         return await message.reply_text("❌ دسترسی denied.")
     await message.reply_text(
@@ -77,10 +73,6 @@ async def start(client, message):
     )
 
 async def handle_file(client, message):
-    # فقط اگر پیام از طرف خود ربات نباشد پاسخ دهد
-    if message.from_user and message.from_user.is_self:
-        return
-        
     if not is_user_allowed(message.from_user.id):
         return
     doc = message.document
@@ -98,10 +90,6 @@ async def handle_file(client, message):
     user_files[user_id].append({"message": message, "file_name": file_name, "password": password, "file_size": doc.file_size})
 
 async def start_zip(client, message):
-    # فقط اگر پیام از طرف خود ربات نباشد پاسخ دهد
-    if message.from_user and message.from_user.is_self:
-        return
-        
     if not is_user_allowed(message.from_user.id): return
     user_id = message.from_user.id
     if user_id not in user_files or not user_files[user_id]:
@@ -115,10 +103,6 @@ async def start_zip(client, message):
     waiting_for_password[user_id] = True
 
 async def cancel_zip(client, message):
-    # فقط اگر پیام از طرف خود ربات نباشد پاسخ دهد
-    if message.from_user and message.from_user.is_self:
-        return
-        
     user_id = message.from_user.id
     if user_id in user_files: user_files[user_id] = []
     waiting_for_password.pop(user_id,None)
@@ -127,17 +111,10 @@ async def cancel_zip(client, message):
     await message.reply_text("❌ عملیات لغو شد.")
 
 def non_command_filter(_, __, message: Message):
-    # فقط اگر پیام از طرف خود ربات نباشد پاسخ دهد
-    if message.from_user and message.from_user.is_self:
-        return False
     return message.text and not message.text.startswith('/')
 non_command = filters.create(non_command_filter)
 
 async def process_zip(client, message):
-    # فقط اگر پیام از طرف خود ربات نباشد پاسخ دهد
-    if message.from_user and message.from_user.is_self:
-        return
-        
     user_id = message.from_user.id
     # مرحله پسورد
     if user_id in waiting_for_password and waiting_for_password[user_id]:
