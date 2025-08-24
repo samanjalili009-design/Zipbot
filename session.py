@@ -1,8 +1,8 @@
 from pyrogram import Client
 from pyrogram.session import StringSession
 
-API_ID = 1867911
-API_HASH = "f9e86b274826212a2712b18754fabc47"
+API_ID = 2487823
+API_HASH = "3ba2af01cad4bdd6138d15e353096e3f"
 
 print("📱 شماره تلفن رو وارد کن (با +98 برای ایران):")
 
