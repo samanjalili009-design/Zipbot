@@ -62,6 +62,9 @@ async def progress_bar(current, total, message: Message, start_time, stage="دا
 
 # ===== هندلرها =====
 async def start(client, message):
+    if message.from_user and message.from_user.is_self:  # پیام از طرف خود ربات
+        return
+    
     if not is_user_allowed(message.from_user.id):
         return await message.reply_text("❌ دسترسی denied.")
     await message.reply_text(
@@ -73,6 +76,9 @@ async def start(client, message):
     )
 
 async def handle_file(client, message):
+    if message.from_user and message.from_user.is_self:  # پیام از طرف خود ربات
+        return
+        
     if not is_user_allowed(message.from_user.id):
         return
     doc = message.document
@@ -90,6 +96,9 @@ async def handle_file(client, message):
     user_files[user_id].append({"message": message, "file_name": file_name, "password": password, "file_size": doc.file_size})
 
 async def start_zip(client, message):
+    if message.from_user and message.from_user.is_self:  # پیام از طرف خود ربات
+        return
+        
     if not is_user_allowed(message.from_user.id): return
     user_id = message.from_user.id
     if user_id not in user_files or not user_files[user_id]:
@@ -103,6 +112,9 @@ async def start_zip(client, message):
     waiting_for_password[user_id] = True
 
 async def cancel_zip(client, message):
+    if message.from_user and message.from_user.is_self:  # پیام از طرف خود ربات
+        return
+        
     user_id = message.from_user.id
     if user_id in user_files: user_files[user_id] = []
     waiting_for_password.pop(user_id,None)
@@ -111,10 +123,13 @@ async def cancel_zip(client, message):
     await message.reply_text("❌ عملیات لغو شد.")
 
 def non_command_filter(_, __, message: Message):
-    return message.text and not message.text.startswith('/')
+    return message.text and not message.text.startswith('/') and not (message.from_user and message.from_user.is_self)
 non_command = filters.create(non_command_filter)
 
 async def process_zip(client, message):
+    if message.from_user and message.from_user.is_self:  # پیام از طرف خود ربات
+        return
+        
     user_id = message.from_user.id
     # مرحله پسورد
     if user_id in waiting_for_password and waiting_for_password[user_id]:
@@ -179,11 +194,11 @@ async def run_bot():
     )
     
     # اضافه کردن هندلرها
-    app.on_message(filters.command("start"))(start)
-    app.on_message(filters.document)(handle_file)
-    app.on_message(filters.command("zip"))(start_zip)
-    app.on_message(filters.command("cancel"))(cancel_zip)
-    app.on_message(filters.text & non_command)(process_zip)
+    app.on_message(filters.command("start") & ~filters.me)(start)
+    app.on_message(filters.document & ~filters.me)(handle_file)
+    app.on_message(filters.command("zip") & ~filters.me)(start_zip)
+    app.on_message(filters.command("cancel") & ~filters.me)(cancel_zip)
+    app.on_message(filters.text & non_command & ~filters.me)(process_zip)
     
     await app.start()
     logger.info("Bot started successfully!")
