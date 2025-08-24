@@ -4,10 +4,11 @@ import tempfile
 import pyzipper
 import logging
 import sys
-import threading
+import asyncio
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from flask import Flask
+from threading import Thread
 
 # ===== تنظیمات =====
 API_ID = 1867911
@@ -186,20 +187,26 @@ async def process_zip(client, message):
         finally:
             user_files[user_id] = []
 
-# ===== تابع برای اجرای ربات در پس‌زمینه =====
+# ===== تابع برای اجرای ربات =====
 def run_bot():
-    """تابعی که ربات را در پس‌زمینه اجرا می‌کند"""
-    logger.info("Starting user bot in background...")
-    app.run()
+    """تابعی که ربات را اجرا می‌کند"""
+    logger.info("Starting user bot...")
+    try:
+        app.run()
+    except Exception as e:
+        logger.error(f"Bot error: {e}")
 
 # ===== اجرا =====
 if __name__ == "__main__":
-    # ربات را در یک thread جداگانه راه‌اندازی کن
-    bot_thread = threading.Thread(target=run_bot)
-    bot_thread.daemon = True
+    # ایجاد event loop جدید برای thread اصلی
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    # اجرای ربات در یک thread جداگانه
+    bot_thread = Thread(target=run_bot, daemon=True)
     bot_thread.start()
-
-    # وب سرور Flask را برای Render اجرا کن
+    
+    # اجرای وب سرور Flask در thread اصلی
     port = int(os.environ.get("PORT", 10000))
     logger.info(f"Starting Flask web server on port {port}...")
-    web_app.run(host="0.0.0.0", port=port)
+    web_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
