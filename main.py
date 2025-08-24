@@ -373,8 +373,8 @@ async def run_bot():
     await app.start()
     logger.info("Bot started successfully!")
     
-    # تنظیمات بهینه‌سازی برای کلاینت
-    app.set_parse_mode("html")
+    # این خط مشکل‌ساز است و باید حذف شود:
+    # app.set_parse_mode("html")
     
     # منتظر ماندن تا ربات اجرا شود
     await asyncio.Event().wait()
