@@ -27,12 +27,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ===== کلاینت Pyrogram =====
+# ===== کلاینت Pyrogram (اصلاح‌شده برای StringSession) =====
 app = Client(
-    session_name="userbot",
+    SESSION_STRING,
     api_id=API_ID,
-    api_hash=API_HASH,
-    session_string=SESSION_STRING
+    api_hash=API_HASH
 )
 
 # ===== داده‌ها =====
