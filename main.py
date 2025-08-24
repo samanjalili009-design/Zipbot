@@ -172,3 +172,8 @@ async def process_zip(client, message):
             await message.reply_text("❌ خطایی رخ داد.")
         finally:
             user_files[user_id] = []
+
+# ===== اجرا =====
+if __name__ == "__main__":
+    logger.info("Starting user bot...")
+    app.run()
