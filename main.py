@@ -62,6 +62,10 @@ async def progress_bar(current, total, message: Message, start_time, stage="دا
 
 # ===== هندلرها =====
 async def start(client, message):
+    # فقط اگر پیام از طرف خود ربات نباشد پاسخ دهد
+    if message.from_user and message.from_user.is_self:
+        return
+        
     if not is_user_allowed(message.from_user.id):
         return await message.reply_text("❌ دسترسی denied.")
     await message.reply_text(
@@ -73,6 +77,10 @@ async def start(client, message):
     )
 
 async def handle_file(client, message):
+    # فقط اگر پیام از طرف خود ربات نباشد پاسخ دهد
+    if message.from_user and message.from_user.is_self:
+        return
+        
     if not is_user_allowed(message.from_user.id):
         return
     doc = message.document
@@ -90,6 +98,10 @@ async def handle_file(client, message):
     user_files[user_id].append({"message": message, "file_name": file_name, "password": password, "file_size": doc.file_size})
 
 async def start_zip(client, message):
+    # فقط اگر پیام از طرف خود ربات نباشد پاسخ دهد
+    if message.from_user and message.from_user.is_self:
+        return
+        
     if not is_user_allowed(message.from_user.id): return
     user_id = message.from_user.id
     if user_id not in user_files or not user_files[user_id]:
@@ -103,6 +115,10 @@ async def start_zip(client, message):
     waiting_for_password[user_id] = True
 
 async def cancel_zip(client, message):
+    # فقط اگر پیام از طرف خود ربات نباشد پاسخ دهد
+    if message.from_user and message.from_user.is_self:
+        return
+        
     user_id = message.from_user.id
     if user_id in user_files: user_files[user_id] = []
     waiting_for_password.pop(user_id,None)
@@ -111,10 +127,17 @@ async def cancel_zip(client, message):
     await message.reply_text("❌ عملیات لغو شد.")
 
 def non_command_filter(_, __, message: Message):
+    # فقط اگر پیام از طرف خود ربات نباشد پاسخ دهد
+    if message.from_user and message.from_user.is_self:
+        return False
     return message.text and not message.text.startswith('/')
 non_command = filters.create(non_command_filter)
 
 async def process_zip(client, message):
+    # فقط اگر پیام از طرف خود ربات نباشد پاسخ دهد
+    if message.from_user and message.from_user.is_self:
+        return
+        
     user_id = message.from_user.id
     # مرحله پسورد
     if user_id in waiting_for_password and waiting_for_password[user_id]:
@@ -220,4 +243,3 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     logger.info(f"Starting Flask web server on port {port}...")
     web_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
-
