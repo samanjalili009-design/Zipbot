@@ -7,6 +7,7 @@ import sys
 import asyncio
 from pyrogram import Client, filters
 from pyrogram.types import Message
+from pyrogram.handlers import MessageHandler
 from flask import Flask
 import threading
 
@@ -178,12 +179,12 @@ async def run_bot():
         in_memory=True
     )
     
-    # اضافه کردن هندلرها
-    app.add_handler(filters.command("start") & filters.private)(start)
-    app.add_handler(filters.document & filters.private)(handle_file)
-    app.add_handler(filters.command("zip") & filters.private)(start_zip)
-    app.add_handler(filters.command("cancel") & filters.private)(cancel_zip)
-    app.add_handler(filters.text & non_command & filters.private)(process_zip)
+    # اضافه کردن هندلرها با استفاده از MessageHandler
+    app.add_handler(MessageHandler(start, filters.command("start") & filters.private))
+    app.add_handler(MessageHandler(handle_file, filters.document & filters.private))
+    app.add_handler(MessageHandler(start_zip, filters.command("zip") & filters.private))
+    app.add_handler(MessageHandler(cancel_zip, filters.command("cancel") & filters.private))
+    app.add_handler(MessageHandler(process_zip, filters.text & non_command & filters.private))
     
     await app.start()
     logger.info("Bot started successfully!")
