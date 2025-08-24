@@ -70,6 +70,7 @@ async def start(client, message):
         
         # فقط در چت خصوصی پاسخ دهد
         if message.chat.type != "private":
+            logger.info(f"Ignoring start command in non-private chat: {message.chat.type}")
             return
             
         if not is_user_allowed(message.from_user.id):
@@ -89,6 +90,7 @@ async def handle_file(client, message):
     try:
         # فقط در چت خصوصی پاسخ دهد
         if message.chat.type != "private":
+            logger.info(f"Ignoring file in non-private chat: {message.chat.type}")
             return
             
         if not is_user_allowed(message.from_user.id):
@@ -128,6 +130,7 @@ async def start_zip(client, message):
     try:
         # فقط در چت خصوصی پاسخ دهد
         if message.chat.type != "private":
+            logger.info(f"Ignoring zip command in non-private chat: {message.chat.type}")
             return
             
         if not is_user_allowed(message.from_user.id): 
@@ -153,6 +156,7 @@ async def cancel_zip(client, message):
     try:
         # فقط در چت خصوصی پاسخ دهد
         if message.chat.type != "private":
+            logger.info(f"Ignoring cancel command in non-private chat: {message.chat.type}")
             return
             
         user_id = message.from_user.id
@@ -178,6 +182,7 @@ async def process_zip(client, message):
     try:
         # فقط در چت خصوصی پاسخ دهد
         if message.chat.type != "private":
+            logger.info(f"Ignoring text in non-private chat: {message.chat.type}")
             return
             
         user_id = message.from_user.id
@@ -275,14 +280,8 @@ async def run_bot():
         
         # دریافت اطلاعات ربات
         me = await app.get_me()
-        logger.info(f"Bot is running as @{me.username}")
-        logger.info(f"Bot ID: {me.id}")
-        
-        # ارسال پیام تست به خودتان
-        try:
-            await app.send_message(ALLOWED_USER_ID, "🤖 ربات با موفقیت راه‌اندازی شد! /start را بزنید.")
-        except Exception as e:
-            logger.error(f"Could not send test message: {e}")
+        logger.info(f"User bot is running as: {me.first_name} (ID: {me.id})")
+        logger.info(f"This is a USER BOT, not a regular bot")
         
         # منتظر ماندن تا ربات اجرا شود
         await asyncio.Event().wait()
