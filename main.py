@@ -66,8 +66,12 @@ async def progress_bar(current, total, message: Message, start_time, stage="دا
 # ===== هندلرها =====
 async def start(client, message):
     try:
-        logger.info(f"Received start command from {message.from_user.id if message.from_user else 'unknown'}")
+        logger.info(f"Received start command from {message.from_user.id if message.from_user else 'unknown'} in chat type: {message.chat.type}")
         
+        # فقط در چت خصوصی پاسخ دهد
+        if message.chat.type != "private":
+            return
+            
         if not is_user_allowed(message.from_user.id):
             return await message.reply_text("❌ دسترسی denied.")
             
@@ -83,6 +87,10 @@ async def start(client, message):
 
 async def handle_file(client, message):
     try:
+        # فقط در چت خصوصی پاسخ دهد
+        if message.chat.type != "private":
+            return
+            
         if not is_user_allowed(message.from_user.id):
             return
             
@@ -118,6 +126,10 @@ async def handle_file(client, message):
 
 async def start_zip(client, message):
     try:
+        # فقط در چت خصوصی پاسخ دهد
+        if message.chat.type != "private":
+            return
+            
         if not is_user_allowed(message.from_user.id): 
             return
             
@@ -139,6 +151,10 @@ async def start_zip(client, message):
 
 async def cancel_zip(client, message):
     try:
+        # فقط در چت خصوصی پاسخ دهد
+        if message.chat.type != "private":
+            return
+            
         user_id = message.from_user.id
         if user_id in user_files: 
             user_files[user_id] = []
@@ -151,12 +167,19 @@ async def cancel_zip(client, message):
         logger.error(f"Error in cancel_zip: {e}")
 
 def non_command_filter(_, __, message: Message):
+    # فقط در چت خصوصی پاسخ دهد
+    if message.chat.type != "private":
+        return False
     return message.text and not message.text.startswith('/')
     
 non_command = filters.create(non_command_filter)
 
 async def process_zip(client, message):
     try:
+        # فقط در چت خصوصی پاسخ دهد
+        if message.chat.type != "private":
+            return
+            
         user_id = message.from_user.id
         
         # مرحله پسورد
@@ -240,12 +263,12 @@ async def run_bot():
             in_memory=True
         )
         
-        # اضافه کردن هندلرها
-        app.add_handler(MessageHandler(start, filters.command("start")))
-        app.add_handler(MessageHandler(handle_file, filters.document))
-        app.add_handler(MessageHandler(start_zip, filters.command("zip")))
-        app.add_handler(MessageHandler(cancel_zip, filters.command("cancel")))
-        app.add_handler(MessageHandler(process_zip, filters.text & non_command))
+        # اضافه کردن هندلرها - فقط برای چت‌های خصوصی
+        app.add_handler(MessageHandler(start, filters.command("start") & filters.private))
+        app.add_handler(MessageHandler(handle_file, filters.document & filters.private))
+        app.add_handler(MessageHandler(start_zip, filters.command("zip") & filters.private))
+        app.add_handler(MessageHandler(cancel_zip, filters.command("cancel") & filters.private))
+        app.add_handler(MessageHandler(process_zip, filters.text & non_command & filters.private))
         
         await app.start()
         logger.info("Bot started successfully!")
