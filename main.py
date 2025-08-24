@@ -277,6 +277,12 @@ async def process_zip_files(client, message, user_id, zip_name, zip_password, pr
         if user_id in user_files:
             user_files[user_id] = []
 
+# ===== فیلتر سفارشی برای تشخیص پیام‌های غیرکامند =====
+def non_command_filter(_, __, m):
+    return m.text and not m.text.startswith('/')
+
+non_command = filters.create(non_command_filter)
+
 # ===== هندلرها =====
 @app.on_message(filters.command("start"))
 async def start_handler(client, message):
@@ -348,7 +354,7 @@ async def cancel_handler(client, message):
     zip_password_storage.pop(user_id, None)
     await message.reply_text("❌ عملیات لغو شد.")
 
-@app.on_message(filters.text & ~filters.command)
+@app.on_message(filters.text & non_command)
 async def text_handler(client, message):
     user_id = message.from_user.id
     
@@ -396,6 +402,10 @@ class HealthHandler(BaseHTTPRequestHandler):
         else:
             self.send_response(404)
             self.end_headers()
+
+    def log_message(self, format, *args):
+        # غیرفعال کردن لاگ‌های پیش‌فرض HTTP server
+        pass
 
 def run_http_server():
     port = int(os.environ.get("PORT", 10000))
