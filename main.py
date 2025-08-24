@@ -9,6 +9,7 @@ import math
 import aiofiles
 from pyrogram import Client, filters
 from pyrogram.types import Message
+from pyrogram.errors import FloodWait
 from flask import Flask
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -23,10 +24,10 @@ MAX_TOTAL_SIZE = 4197152000  # 2GB
 MAX_SPLIT_SIZE = 1990000000  # 1.99GB - برای حاشیه امنیت
 
 # تنظیمات بهینه‌سازی سرعت
-MAX_CONCURRENT_DOWNLOADS = 4  # تعداد دانلودهای همزمان
-DOWNLOAD_CHUNK_SIZE = 1024 * 1024  # 1MB chunk size برای دانلود
-UPLOAD_CHUNK_SIZE = 1024 * 1024  # 1MB chunk size برای آپلود
-BUFFER_SIZE = 16 * 1024 * 1024  # 16MB بافر برای عملیات فایل
+MAX_CONCURRENT_DOWNLOADS = 3  # کاهش تعداد دانلودهای همزمان برای جلوگیری از Flood
+DOWNLOAD_CHUNK_SIZE = 512 * 1024  # 512KB chunk size
+UPLOAD_CHUNK_SIZE = 512 * 1024  # 512KB chunk size
+BUFFER_SIZE = 8 * 1024 * 1024  # 8MB بافر
 
 # ===== لاگ =====
 logging.basicConfig(
@@ -46,7 +47,44 @@ waiting_for_filename = {}
 zip_password_storage = {}
 
 # ===== ThreadPool برای عملیات I/O =====
-io_executor = ThreadPoolExecutor(max_workers=8)
+io_executor = ThreadPoolExecutor(max_workers=4)
+
+# ===== فانکشن‌های کمکی برای مدیریت FloodWait =====
+async def safe_send_message(client, chat_id, text, **kwargs):
+    """ارسال پیام با مدیریت FloodWait"""
+    try:
+        return await client.send_message(chat_id, text, **kwargs)
+    except FloodWait as e:
+        logger.warning(f"FloodWait: Waiting {e.value} seconds")
+        await asyncio.sleep(e.value)
+        return await client.send_message(chat_id, text, **kwargs)
+    except Exception as e:
+        logger.error(f"Error sending message: {e}")
+        raise
+
+async def safe_reply_message(message, text, **kwargs):
+    """Reply به پیام با مدیریت FloodWait"""
+    try:
+        return await message.reply_text(text, **kwargs)
+    except FloodWait as e:
+        logger.warning(f"FloodWait: Waiting {e.value} seconds")
+        await asyncio.sleep(e.value)
+        return await message.reply_text(text, **kwargs)
+    except Exception as e:
+        logger.error(f"Error replying to message: {e}")
+        raise
+
+async def safe_edit_message(message, text, **kwargs):
+    """Edit پیام با مدیریت FloodWait"""
+    try:
+        return await message.edit_text(text, **kwargs)
+    except FloodWait as e:
+        logger.warning(f"FloodWait: Waiting {e.value} seconds")
+        await asyncio.sleep(e.value)
+        return await message.edit_text(text, **kwargs)
+    except Exception:
+        # اگر پیام حذف شده یا قابل edit نیست، خطا را نادیده بگیر
+        pass
 
 # ===== فانکشن‌های جدید برای تقسیم فایل =====
 async def split_large_file(file_path, max_size=MAX_SPLIT_SIZE):
@@ -57,15 +95,11 @@ async def split_large_file(file_path, max_size=MAX_SPLIT_SIZE):
     if file_size <= max_size:
         return [file_path]  # نیازی به تقسیم نیست
     
-    # محاسبه تعداد partهای مورد نیاز
-    num_parts = math.ceil(file_size / max_size)
     base_name = os.path.basename(file_path)
     
-    # استفاده از aiofiles برای عملیات غیرمسدود کننده
     async with aiofiles.open(file_path, 'rb') as f:
         part_num = 1
         while True:
-            # خواندن chunk بزرگ برای افزایش سرعت
             chunk = await f.read(max_size)
             if not chunk:
                 break
@@ -79,19 +113,17 @@ async def split_large_file(file_path, max_size=MAX_SPLIT_SIZE):
             part_files.append(part_path)
             part_num += 1
     
-    # حذف فایل اصلی
     await asyncio.get_event_loop().run_in_executor(io_executor, os.remove, file_path)
     return part_files
 
 async def create_split_zip(files, zip_path, password, processing_msg):
     """ایجاد زیپ تقسیم شده با بهینه‌سازی سرعت"""
     try:
-        # استفاده از بافر بزرگ برای عملیات زیپ
         with pyzipper.AESZipFile(
             zip_path, "w", 
             compression=pyzipper.ZIP_DEFLATED, 
             encryption=pyzipper.WZ_AES,
-            compresslevel=6  # تعادل بین سرعت و حجم
+            compresslevel=6
         ) as zipf:
             zipf.setpassword(password.encode())
             
@@ -100,25 +132,19 @@ async def create_split_zip(files, zip_path, password, processing_msg):
                 file_path = file_info["path"]
                 file_name = file_info["name"]
                 
-                # اگر فایل بزرگ است، آن را تقسیم کن
                 if os.path.getsize(file_path) > MAX_SPLIT_SIZE:
                     parts = await split_large_file(file_path)
                     for part_path in parts:
                         part_name = os.path.basename(part_path)
                         zipf.write(part_path, part_name)
-                        # حذف part بعد از اضافه کردن
                         await asyncio.get_event_loop().run_in_executor(io_executor, os.remove, part_path)
                 else:
                     zipf.write(file_path, file_name)
                     await asyncio.get_event_loop().run_in_executor(io_executor, os.remove, file_path)
                 
-                # آپدیت پیشرفت
-                if i % 2 == 0 or i == total_files:  # کاهش تعداد آپدیت‌ها برای افزایش سرعت
+                if i % 3 == 0 or i == total_files:
                     progress_text = f"⏳ در حال فشرده سازی... {i}/{total_files}"
-                    try: 
-                        await processing_msg.edit_text(progress_text)
-                    except: 
-                        pass
+                    await safe_edit_message(processing_msg, progress_text)
                 
         return True
     except Exception as e:
@@ -140,7 +166,6 @@ async def progress_bar(current, total, message: Message, start_time, stage="دا
     bar_filled = int(percent / 5)
     bar = "▓" * bar_filled + "░" * (20 - bar_filled)
     
-    # نمایش سرعت به صورت MB/s
     speed_mb = speed / (1024 * 1024)
     
     text = f"""
@@ -152,32 +177,31 @@ async def progress_bar(current, total, message: Message, start_time, stage="دا
 ⚡️ سرعت: {speed_mb:.2f} MB/s
 ⏳ زمان باقی‌مانده: {eta}s
     """
-    try: 
-        await message.edit_text(text)
-    except: 
-        pass
+    await safe_edit_message(message, text)
 
 async def download_file_with_retry(client, file_msg, file_path, progress_callback):
     """دانلود فایل با قابلیت retry و بهینه‌سازی سرعت"""
-    max_retries = 3
+    max_retries = 2
     for attempt in range(max_retries):
         try:
             await client.download_media(
                 file_msg, 
                 file_path, 
                 progress=progress_callback,
-                block=False,  # غیر مسدود کننده
+                block=False,
             )
             return True
+        except FloodWait as e:
+            logger.warning(f"FloodWait during download: {e}")
+            await asyncio.sleep(e.value)
         except Exception as e:
             if attempt == max_retries - 1:
                 raise e
-            await asyncio.sleep(2)  # انتظار قبل از retry
+            await asyncio.sleep(1)
     return False
 
-async def download_files_concurrently(client, files_to_process, processing_msg, tmp_dir):
-    """دانلود همزمان چندین فایل"""
-    download_tasks = []
+async def download_files_sequentially(client, files_to_process, processing_msg, tmp_dir):
+    """دانلود فایل‌ها به صورت متوالی برای جلوگیری از Flood"""
     files_to_zip = []
     
     for i, finfo in enumerate(files_to_process, 1):
@@ -185,32 +209,17 @@ async def download_files_concurrently(client, files_to_process, processing_msg, 
         file_name = finfo["file_name"]
         file_path = os.path.join(tmp_dir, file_name)
         
-        # ایجاد تابع پیشرفت برای هر فایل
         async def progress_callback(current, total):
-            nonlocal i
-            if total == 0:
-                return
             await progress_bar(current, total, processing_msg, time.time(), f"دانلود فایل {i}")
         
-        # اضافه کردن وظیفه دانلود
-        task = asyncio.create_task(
-            download_file_with_retry(client, file_msg, file_path, progress_callback)
-        )
-        download_tasks.append((task, file_path, file_name, i))
-    
-    # اجرای همزمان دانلودها
-    for task, file_path, file_name, file_num in download_tasks:
         try:
-            success = await task
+            success = await download_file_with_retry(client, file_msg, file_path, progress_callback)
             if success and os.path.exists(file_path) and os.path.getsize(file_path) > 0:
                 files_to_zip.append({"path": file_path, "name": file_name})
                 
-                # آپدیت پیشرفت
-                progress_text = f"✅ دانلود فایل {file_num} تکمیل شد"
-                try: 
-                    await processing_msg.edit_text(progress_text)
-                except: 
-                    pass
+                progress_text = f"✅ دانلود فایل {i} تکمیل شد"
+                await safe_edit_message(processing_msg, progress_text)
+                await asyncio.sleep(1)  # تاخیر بین دانلودها
                 
         except Exception as e:
             logger.error(f"Error downloading file {file_name}: {e}")
@@ -220,16 +229,18 @@ async def download_files_concurrently(client, files_to_process, processing_msg, 
 # ===== هندلرها =====
 async def start(client, message):
     if not is_user_allowed(message.from_user.id):
-        return await message.reply_text("❌ دسترسی denied.")
-    await message.reply_text(
-        "سلام 👋\nفایل‌تو بفرست تا برات زیپ کنم.\n"
-        "💡 کپشن فایل = pass=رمز برای تعیین پسورد (اختیاری)\n"
-        f"📦 حداکثر حجم هر فایل: نامحدود (فایل‌های بزرگ به صورت خودکار تقسیم می‌شوند)\n"
-        f"📦 حداکثر حجم کل: {MAX_TOTAL_SIZE//1024//1024}MB\n"
-        f"🚀 حداکثر دانلود همزمان: {MAX_CONCURRENT_DOWNLOADS} فایل\n"
-        "🔧 فایل‌های بزرگتر از 2GB به صورت خودکار تقسیم می‌شوند\n"
-        "بعد از ارسال فایل‌ها دستور /zip رو بزن تا ابتدا پسورد و سپس اسم فایل نهایی را وارد کنی."
-    )
+        return
+    try:
+        await safe_reply_message(message,
+            "سلام 👋\nفایل‌تو بفرست تا برات زیپ کنم.\n"
+            "💡 کپشن فایل = pass=رمز برای تعیین پسورد (اختیاری)\n"
+            f"📦 حداکثر حجم هر فایل: نامحدود (فایل‌های بزرگ به صورت خودکار تقسیم می‌شوند)\n"
+            f"📦 حداکثر حجم کل: {MAX_TOTAL_SIZE//1024//1024}MB\n"
+            "🔧 فایل‌های بزرگتر از 2GB به صورت خودکار تقسیم می‌شوند\n"
+            "بعد از ارسال فایل‌ها دستور /zip رو بزن تا ابتدا پسورد و سپس اسم فایل نهایی را وارد کنی."
+        )
+    except Exception as e:
+        logger.error(f"Error in start handler: {e}")
 
 async def handle_file(client, message):
     if not is_user_allowed(message.from_user.id):
@@ -237,6 +248,7 @@ async def handle_file(client, message):
     doc = message.document
     if not doc:
         return
+    
     file_name = doc.file_name or f"file_{message.id}"
     caption = message.caption or ""
     password = None
@@ -253,25 +265,37 @@ async def handle_file(client, message):
         "file_size": doc.file_size
     })
     
-    # پیام تأیید دریافت فایل
     size_mb = doc.file_size // 1024 // 1024
-    await message.reply_text(f"✅ فایل دریافت شد: {file_name}\n📦 حجم: {size_mb}MB")
+    try:
+        await safe_reply_message(message, f"✅ فایل دریافت شد: {file_name}\n📦 حجم: {size_mb}MB")
+    except Exception as e:
+        logger.error(f"Error confirming file receipt: {e}")
 
 async def start_zip(client, message):
     if not is_user_allowed(message.from_user.id): 
         return
     user_id = message.from_user.id
     if user_id not in user_files or not user_files[user_id]:
-        return await message.reply_text("❌ هیچ فایلی برای زیپ کردن وجود ندارد.")
+        try:
+            await safe_reply_message(message, "❌ هیچ فایلی برای زیپ کردن وجود ندارد.")
+        except Exception as e:
+            logger.error(f"Error in start_zip: {e}")
+        return
     
     total_size = sum(f["file_size"] for f in user_files[user_id])
     if total_size > MAX_TOTAL_SIZE:
-        await message.reply_text(f"❌ حجم کل فایل‌ها بیش از حد مجاز است! ({MAX_TOTAL_SIZE//1024//1024}MB)")
+        try:
+            await safe_reply_message(message, f"❌ حجم کل فایل‌ها بیش از حد مجاز است! ({MAX_TOTAL_SIZE//1024//1024}MB)")
+        except Exception as e:
+            logger.error(f"Error in size check: {e}")
         user_files[user_id] = []
         return
         
-    await message.reply_text("🔐 لطفاً رمز عبور برای فایل زیپ وارد کن:\n❌ برای لغو /cancel را بزنید")
-    waiting_for_password[user_id] = True
+    try:
+        await safe_reply_message(message, "🔐 لطفاً رمز عبور برای فایل زیپ وارد کن:\n❌ برای لغو /cancel را بزنید")
+        waiting_for_password[user_id] = True
+    except Exception as e:
+        logger.error(f"Error requesting password: {e}")
 
 async def cancel_zip(client, message):
     user_id = message.from_user.id
@@ -280,7 +304,10 @@ async def cancel_zip(client, message):
     waiting_for_password.pop(user_id, None)
     waiting_for_filename.pop(user_id, None)
     zip_password_storage.pop(user_id, None)
-    await message.reply_text("❌ عملیات لغو شد.")
+    try:
+        await safe_reply_message(message, "❌ عملیات لغو شد.")
+    except Exception as e:
+        logger.error(f"Error in cancel: {e}")
 
 def non_command_filter(_, __, message: Message):
     return message.text and not message.text.startswith('/')
@@ -293,30 +320,50 @@ async def process_zip(client, message):
     if user_id in waiting_for_password and waiting_for_password[user_id]:
         zip_password = message.text.strip()
         if not zip_password:
-            return await message.reply_text("❌ رمز عبور نمی‌تواند خالی باشد.")
+            try:
+                await safe_reply_message(message, "❌ رمز عبور نمی‌تواند خالی باشد.")
+            except Exception as e:
+                logger.error(f"Error in password validation: {e}")
+            return
+        
         zip_password_storage[user_id] = zip_password
         waiting_for_password.pop(user_id, None)
         waiting_for_filename[user_id] = True
-        return await message.reply_text("📝 حالا اسم فایل زیپ نهایی را وارد کن (بدون .zip)")
+        
+        try:
+            await safe_reply_message(message, "📝 حالا اسم فایل زیپ نهایی را وارد کن (بدون .zip)")
+        except Exception as e:
+            logger.error(f"Error requesting filename: {e}")
+        return
     
     # مرحله اسم فایل
     if user_id in waiting_for_filename and waiting_for_filename[user_id]:
         zip_name = message.text.strip()
         if not zip_name:
-            return await message.reply_text("❌ اسم فایل نمی‌تواند خالی باشد.")
+            try:
+                await safe_reply_message(message, "❌ اسم فایل نمی‌تواند خالی باشد.")
+            except Exception as e:
+                logger.error(f"Error in filename validation: {e}")
+            return
+        
         waiting_for_filename.pop(user_id, None)
-        processing_msg = await message.reply_text("⏳ در حال ایجاد فایل زیپ...")
         zip_password = zip_password_storage.pop(user_id, None)
         
         try:
+            processing_msg = await safe_reply_message(message, "⏳ در حال ایجاد فایل زیپ...")
+        except Exception as e:
+            logger.error(f"Error creating processing message: {e}")
+            return
+        
+        try:
             with tempfile.TemporaryDirectory() as tmp_dir:
-                # دانلود همه فایل‌ها به صورت همزمان
-                files_to_zip = await download_files_concurrently(
+                # دانلود فایل‌ها به صورت متوالی
+                files_to_zip = await download_files_sequentially(
                     client, user_files[user_id], processing_msg, tmp_dir
                 )
                 
                 if not files_to_zip:
-                    await message.reply_text("❌ خطایی در دانلود فایل‌ها رخ داد.")
+                    await safe_reply_message(message, "❌ خطایی در دانلود فایل‌ها رخ داد.")
                     return
                 
                 # ایجاد زیپ
@@ -326,25 +373,38 @@ async def process_zip(client, message):
                 success = await create_split_zip(files_to_zip, zip_path, zip_password, processing_msg)
                 
                 if success and os.path.exists(zip_path):
-                    # آپلود زیپ با بهینه‌سازی سرعت
+                    # آپلود زیپ
                     start_time = time.time()
                     
                     async def upload_progress(current, total):
                         await progress_bar(current, total, processing_msg, start_time, "آپلود")
                     
-                    await client.send_document(
-                        message.chat.id,
-                        zip_path,
-                        caption=f"✅ فایل زیپ آماده شد!\n🔑 رمز: `{zip_password}`\n📦 تعداد فایل‌ها: {len(files_to_zip)}",
-                        progress=upload_progress,
-                        force_document=True
-                    )
+                    try:
+                        await client.send_document(
+                            message.chat.id,
+                            zip_path,
+                            caption=f"✅ فایل زیپ آماده شد!\n🔑 رمز: `{zip_password}`\n📦 تعداد فایل‌ها: {len(files_to_zip)}",
+                            progress=upload_progress,
+                            force_document=True
+                        )
+                    except FloodWait as e:
+                        logger.warning(f"FloodWait during upload: {e}")
+                        await asyncio.sleep(e.value)
+                        await client.send_document(
+                            message.chat.id,
+                            zip_path,
+                            caption=f"✅ فایل زیپ آماده شد!\n🔑 رمز: `{zip_password}`\n📦 تعداد فایل‌ها: {len(files_to_zip)}",
+                            force_document=True
+                        )
                 else:
-                    await message.reply_text("❌ خطایی در ایجاد فایل زیپ رخ داد.")
+                    await safe_reply_message(message, "❌ خطایی در ایجاد فایل زیپ رخ داد.")
                     
         except Exception as e:
             logger.error(f"Error in zip process: {e}", exc_info=True)
-            await message.reply_text(f"❌ خطایی رخ داد: {str(e)}")
+            try:
+                await safe_reply_message(message, f"❌ خطایی رخ داد: {str(e)}")
+            except:
+                pass
         finally:
             user_files[user_id] = []
 
@@ -360,7 +420,7 @@ async def run_bot():
         api_hash=API_HASH,
         session_string=SESSION_STRING,
         in_memory=True,
-        max_concurrent_transmissions=MAX_CONCURRENT_DOWNLOADS  # افزایش انتقال همزمان
+        max_concurrent_transmissions=2  # کاهش انتقال همزمان
     )
     
     # اضافه کردن هندلرها
@@ -372,9 +432,6 @@ async def run_bot():
     
     await app.start()
     logger.info("Bot started successfully!")
-    
-    # این خط مشکل‌ساز است و باید حذف شود:
-    # app.set_parse_mode("html")
     
     # منتظر ماندن تا ربات اجرا شود
     await asyncio.Event().wait()
