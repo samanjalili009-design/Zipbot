@@ -171,7 +171,7 @@ async def process_zip(client, message):
                         file_path = os.path.join(tmp_dir,file_name)
                         start_time = time.time()
                         await client.download_media(file_msg,file_path,progress=progress_bar,progress_args=(processing_msg,start_time,"دانلود"))
-                        if os.path.exists(file_path) و os.path.getsize(file_path)>0:
+                        if os.path.exists(file_path) and os.path.getsize(file_path)>0:
                             zipf.write(file_path,file_name)
                         os.remove(file_path)
                 start_time = time.time()
