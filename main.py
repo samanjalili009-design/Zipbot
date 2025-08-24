@@ -35,6 +35,8 @@ app = Client(
 # ===== داده‌ها =====
 user_files = {}
 waiting_for_password = {}
+waiting_for_filename = {}
+zip_password_storage = {}
 
 # ===== فانکشن‌ها =====
 def is_user_allowed(user_id: int) -> bool:
@@ -68,19 +70,19 @@ async def start(client, message):
         return await message.reply_text("❌ دسترسی denied.")
     await message.reply_text(
         "سلام 👋\nفایل‌تو بفرست تا برات زیپ کنم.\n"
-        "💡 کپشن فایل = pass=رمز برای تعیین پسورد برای هر فایل (اختیاری)\n"
+        "💡 کپشن فایل = pass=رمز برای تعیین پسورد (اختیاری)\n"
         f"📦 حداکثر حجم هر فایل: {MAX_FILE_SIZE//1024//1024}MB\n"
         f"📦 حداکثر حجم کل: {MAX_TOTAL_SIZE//1024//1024}MB\n"
-        "بعد از ارسال فایل‌ها دستور /zip رو بزن تا پسورد بگیری و فایل زیپ آماده شود."
+        "بعد از ارسال فایل‌ها دستور /zip رو بزن تا ابتدا پسورد و سپس اسم فایل نهایی را وارد کنی."
     )
 
 @app.on_message(filters.document)
 async def handle_file(client, message):
     if not is_user_allowed(message.from_user.id):
-        return await message.reply_text("❌ دسترسی denied.")
+        return
     doc = message.document
     if not doc:
-        return await message.reply_text("فقط فایل بفرست 🌹")
+        return
     file_name = doc.file_name or f"file_{message.id}"
     caption = message.caption or ""
     password = None
@@ -94,8 +96,7 @@ async def handle_file(client, message):
 
 @app.on_message(filters.command("zip"))
 async def start_zip(client, message):
-    if not is_user_allowed(message.from_user.id):
-        return await message.reply_text("❌ دسترسی denied.")
+    if not is_user_allowed(message.from_user.id): return
     user_id = message.from_user.id
     if user_id not in user_files or not user_files[user_id]:
         return await message.reply_text("❌ هیچ فایلی برای زیپ کردن وجود ندارد.")
@@ -109,59 +110,65 @@ async def start_zip(client, message):
 
 @app.on_message(filters.command("cancel"))
 async def cancel_zip(client, message):
-    if not is_user_allowed(message.from_user.id):
-        return await message.reply_text("❌ دسترسی denied.")
     user_id = message.from_user.id
     if user_id in user_files: user_files[user_id] = []
     waiting_for_password.pop(user_id,None)
+    waiting_for_filename.pop(user_id,None)
+    zip_password_storage.pop(user_id,None)
     await message.reply_text("❌ عملیات لغو شد.")
 
-# ===== هندلر پسورد و زیپ =====
+# ===== هندلر برای پسورد و اسم فایل =====
 def non_command_filter(_, __, message: Message):
     return message.text and not message.text.startswith('/')
 non_command = filters.create(non_command_filter)
 
 @app.on_message(filters.text & non_command)
-async def process_zip_password(client, message):
-    if not is_user_allowed(message.from_user.id): return
+async def process_zip(client, message):
     user_id = message.from_user.id
-    if user_id not in waiting_for_password or not waiting_for_password[user_id]: return
-    zip_password = message.text.strip()
-    if not zip_password: return await message.reply_text("❌ رمز عبور نمی‌تواند خالی باشد.")
-    waiting_for_password.pop(user_id,None)
-    processing_msg = await message.reply_text("⏳ در حال ایجاد فایل زیپ...")
-
-    try:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            zip_file_name = f"archive_{int(time.time())}.zip"
-            zip_path = os.path.join(tmp_dir, zip_file_name)
-            with pyzipper.AESZipFile(zip_path,"w",compression=pyzipper.ZIP_DEFLATED,encryption=pyzipper.WZ_AES) as zipf:
-                zipf.setpassword(zip_password.encode())  # فقط یکبار
-                total_files = len(user_files[user_id])
-                for i, finfo in enumerate(user_files[user_id], 1):
-                    file_msg = finfo["message"]
-                    file_name = finfo["file_name"]
-                    file_path = os.path.join(tmp_dir, file_name)
-                    start_time = time.time()
-                    await client.download_media(file_msg, file_path, progress=progress_bar, progress_args=(processing_msg, start_time, "دانلود"))
-                    if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
-                        zipf.write(file_path, file_name)  # بدون setpassword دوباره
-                    os.remove(file_path)
-            start_time = time.time()
-            await client.send_document(
-                message.chat.id,
-                zip_path,
-                caption=f"✅ فایل زیپ آماده شد!\n🔑 رمز: `{zip_password}`\n📦 تعداد فایل‌ها: {total_files}",
-                progress=progress_bar,
-                progress_args=(processing_msg, start_time, "آپلود")
-            )
-    except Exception as e:
-        logger.error(f"Error in zip: {e}",exc_info=True)
-        await message.reply_text("❌ خطایی رخ داد.")
-    finally:
-        user_files[user_id] = []
-
-# ===== اجرا =====
-if __name__ == "__main__":
-    logger.info("Starting user bot...")
-    app.run()
+    # مرحله پسورد
+    if user_id in waiting_for_password and waiting_for_password[user_id]:
+        zip_password = message.text.strip()
+        if not zip_password:
+            return await message.reply_text("❌ رمز عبور نمی‌تواند خالی باشد.")
+        zip_password_storage[user_id] = zip_password
+        waiting_for_password.pop(user_id,None)
+        waiting_for_filename[user_id] = True
+        return await message.reply_text("📝 حالا اسم فایل زیپ نهایی را وارد کن (بدون .zip)")
+    
+    # مرحله اسم فایل
+    if user_id in waiting_for_filename and waiting_for_filename[user_id]:
+        zip_name = message.text.strip()
+        if not zip_name:
+            return await message.reply_text("❌ اسم فایل نمی‌تواند خالی باشد.")
+        waiting_for_filename.pop(user_id,None)
+        processing_msg = await message.reply_text("⏳ در حال ایجاد فایل زیپ...")
+        zip_password = zip_password_storage.pop(user_id,None)
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                zip_file_name = f"{zip_name}.zip"
+                zip_path = os.path.join(tmp_dir, zip_file_name)
+                with pyzipper.AESZipFile(zip_path,"w",compression=pyzipper.ZIP_DEFLATED,encryption=pyzipper.WZ_AES) as zipf:
+                    zipf.setpassword(zip_password.encode())
+                    total_files = len(user_files[user_id])
+                    for i, finfo in enumerate(user_files[user_id],1):
+                        file_msg = finfo["message"]
+                        file_name = finfo["file_name"]
+                        file_path = os.path.join(tmp_dir,file_name)
+                        start_time = time.time()
+                        await client.download_media(file_msg,file_path,progress=progress_bar,progress_args=(processing_msg,start_time,"دانلود"))
+                        if os.path.exists(file_path) and os.path.getsize(file_path)>0:
+                            zipf.write(file_path,file_name)
+                        os.remove(file_path)
+                start_time = time.time()
+                await client.send_document(
+                    message.chat.id,
+                    zip_path,
+                    caption=f"✅ فایل زیپ آماده شد!\n🔑 رمز: `{zip_password}`\n📦 تعداد فایل‌ها: {total_files}",
+                    progress=progress_bar,
+                    progress_args=(processing_msg,start_time,"آپلود")
+                )
+        except Exception as e:
+            logger.error(f"Error in zip: {e}",exc_info=True)
+            await message.reply_text("❌ خطایی رخ داد.")
+        finally:
+            user_files[user_id] = []
