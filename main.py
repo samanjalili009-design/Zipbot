@@ -68,9 +68,6 @@ async def start(client, message):
     try:
         logger.info(f"Received start command from {message.from_user.id if message.from_user else 'unknown'}")
         
-        if not message.chat.type == "private":
-            return
-            
         if not is_user_allowed(message.from_user.id):
             return await message.reply_text("❌ دسترسی denied.")
             
@@ -86,9 +83,6 @@ async def start(client, message):
 
 async def handle_file(client, message):
     try:
-        if not message.chat.type == "private":
-            return
-            
         if not is_user_allowed(message.from_user.id):
             return
             
@@ -124,9 +118,6 @@ async def handle_file(client, message):
 
 async def start_zip(client, message):
     try:
-        if not message.chat.type == "private":
-            return
-            
         if not is_user_allowed(message.from_user.id): 
             return
             
@@ -148,9 +139,6 @@ async def start_zip(client, message):
 
 async def cancel_zip(client, message):
     try:
-        if not message.chat.type == "private":
-            return
-            
         user_id = message.from_user.id
         if user_id in user_files: 
             user_files[user_id] = []
@@ -163,17 +151,12 @@ async def cancel_zip(client, message):
         logger.error(f"Error in cancel_zip: {e}")
 
 def non_command_filter(_, __, message: Message):
-    if not message.chat.type == "private":
-        return False
     return message.text and not message.text.startswith('/')
     
 non_command = filters.create(non_command_filter)
 
 async def process_zip(client, message):
     try:
-        if not message.chat.type == "private":
-            return
-            
         user_id = message.from_user.id
         
         # مرحله پسورد
@@ -258,11 +241,11 @@ async def run_bot():
         )
         
         # اضافه کردن هندلرها
-        app.add_handler(MessageHandler(start, filters.command("start") & filters.private))
-        app.add_handler(MessageHandler(handle_file, filters.document & filters.private))
-        app.add_handler(MessageHandler(start_zip, filters.command("zip") & filters.private))
-        app.add_handler(MessageHandler(cancel_zip, filters.command("cancel") & filters.private))
-        app.add_handler(MessageHandler(process_zip, filters.text & non_command & filters.private))
+        app.add_handler(MessageHandler(start, filters.command("start")))
+        app.add_handler(MessageHandler(handle_file, filters.document))
+        app.add_handler(MessageHandler(start_zip, filters.command("zip")))
+        app.add_handler(MessageHandler(cancel_zip, filters.command("cancel")))
+        app.add_handler(MessageHandler(process_zip, filters.text & non_command))
         
         await app.start()
         logger.info("Bot started successfully!")
@@ -270,15 +253,24 @@ async def run_bot():
         # دریافت اطلاعات ربات
         me = await app.get_me()
         logger.info(f"Bot is running as @{me.username}")
+        logger.info(f"Bot ID: {me.id}")
+        
+        # ارسال پیام تست به خودتان
+        try:
+            await app.send_message(ALLOWED_USER_ID, "🤖 ربات با موفقیت راه‌اندازی شد! /start را بزنید.")
+        except Exception as e:
+            logger.error(f"Could not send test message: {e}")
         
         # منتظر ماندن تا ربات اجرا شود
         await asyncio.Event().wait()
         
     except Exception as e:
-        logger.error(f"Failed to start bot: {e}")
+        logger.error(f"Failed to start bot: {e}", exc_info=True)
 
 # ===== اجرا =====
 if __name__ == "__main__":
+    logger.info("Starting application...")
+    
     # ایجاد وب سرور Flask
     web_app = Flask(__name__)
     
@@ -292,17 +284,24 @@ if __name__ == "__main__":
     
     # اجرای ربات در یک thread جداگانه
     def start_bot():
+        logger.info("Starting bot thread...")
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
             loop.run_until_complete(run_bot())
         except Exception as e:
-            logger.error(f"Bot error: {e}")
+            logger.error(f"Bot error: {e}", exc_info=True)
     
     bot_thread = threading.Thread(target=start_bot, daemon=True)
     bot_thread.start()
     
+    logger.info("Bot thread started, starting Flask server...")
+    
     # اجرای Flask در thread اصلی
     port = int(os.environ.get("PORT", 10000))
     logger.info(f"Starting Flask web server on port {port}...")
-    web_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+    
+    try:
+        web_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+    except Exception as e:
+        logger.error(f"Flask error: {e}")
