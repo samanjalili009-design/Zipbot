@@ -18,6 +18,14 @@ ALLOWED_USER_ID = 417536686
 MAX_FILE_SIZE = 2097152000  # 2GB
 MAX_TOTAL_SIZE = 2097152000  # 2GB
 
+# ===== محدودیت چت =====
+# به‌صورت پیش‌فرض فقط در Saved Messages کار می‌کند.
+# اگر می‌خواهی در PM یک ربات مشخص هم کار کند، یوزرنیم‌اش را اینجا اضافه کن (بدون @)
+ALLOWED_CHAT_USERNAMES = set()  # مثلا: {"MyZipBot"}
+ALLOWED_CHAT_IDS = set()        # اگه چت/گروه خاصی مد نظرته، آیدی عددیش را اینجا اضافه کن
+
+SELF_ID = 0  # بعد از start پر می‌شود
+
 # ===== لاگ =====
 logging.basicConfig(
     level=logging.INFO,
@@ -38,6 +46,20 @@ zip_password_storage = {}
 # ===== فانکشن‌ها =====
 def is_user_allowed(user_id: int) -> bool:
     return user_id == ALLOWED_USER_ID
+
+def is_chat_allowed(chat) -> bool:
+    # 1) فقط Saved Messages (chat.id == SELF_ID)
+    if chat.id == SELF_ID:
+        return True
+    # 2) چت‌هایی که به‌صورت عددی مجاز شدند
+    if chat.id in ALLOWED_CHAT_IDS:
+        return True
+    # 3) یوزرنیم‌های مجاز (برای PM یک ربات یا کانال)
+    uname = (chat.username or "").lower()
+    if uname and uname in {u.lower() for u in ALLOWED_CHAT_USERNAMES}:
+        return True
+    # در غیر این صورت مجاز نیست
+    return False
 
 async def progress_bar(current, total, message: Message, start_time, stage="دانلود"):
     now = time.time()
@@ -62,8 +84,11 @@ async def progress_bar(current, total, message: Message, start_time, stage="دا
 
 # ===== هندلرها =====
 async def start(client, message):
+    # فقط از طرف خودت + فقط در چت مجاز
     if not is_user_allowed(message.from_user.id):
-        return await message.reply_text("❌ دسترسی denied.")
+        return
+    if not is_chat_allowed(message.chat):
+        return
     await message.reply_text(
         "سلام 👋\nفایل‌تو بفرست تا برات زیپ کنم.\n"
         "💡 کپشن فایل = pass=رمز برای تعیین پسورد (اختیاری)\n"
@@ -74,6 +99,8 @@ async def start(client, message):
 
 async def handle_file(client, message):
     if not is_user_allowed(message.from_user.id):
+        return
+    if not is_chat_allowed(message.chat):
         return
     doc = message.document
     if not doc:
@@ -90,7 +117,10 @@ async def handle_file(client, message):
     user_files[user_id].append({"message": message, "file_name": file_name, "password": password, "file_size": doc.file_size})
 
 async def start_zip(client, message):
-    if not is_user_allowed(message.from_user.id): return
+    if not is_user_allowed(message.from_user.id):
+        return
+    if not is_chat_allowed(message.chat):
+        return
     user_id = message.from_user.id
     if user_id not in user_files or not user_files[user_id]:
         return await message.reply_text("❌ هیچ فایلی برای زیپ کردن وجود ندارد.")
@@ -103,6 +133,10 @@ async def start_zip(client, message):
     waiting_for_password[user_id] = True
 
 async def cancel_zip(client, message):
+    if not is_user_allowed(message.from_user.id):
+        return
+    if not is_chat_allowed(message.chat):
+        return
     user_id = message.from_user.id
     if user_id in user_files: user_files[user_id] = []
     waiting_for_password.pop(user_id,None)
@@ -115,6 +149,11 @@ def non_command_filter(_, __, message: Message):
 non_command = filters.create(non_command_filter)
 
 async def process_zip(client, message):
+    if not is_user_allowed(message.from_user.id):
+        return
+    if not is_chat_allowed(message.chat):
+        return
+
     user_id = message.from_user.id
     # مرحله پسورد
     if user_id in waiting_for_password and waiting_for_password[user_id]:
@@ -146,7 +185,12 @@ async def process_zip(client, message):
                         file_name = finfo["file_name"]
                         file_path = os.path.join(tmp_dir,file_name)
                         start_time = time.time()
-                        await client.download_media(file_msg,file_path,progress=progress_bar,progress_args=(processing_msg,start_time,"دانلود"))
+                        await client.download_media(
+                            file_msg,
+                            file_path,
+                            progress=progress_bar,
+                            progress_args=(processing_msg,start_time,"دانلود")
+                        )
                         if os.path.exists(file_path) and os.path.getsize(file_path)>0:
                             zipf.write(file_path,file_name)
                         os.remove(file_path)
@@ -167,7 +211,7 @@ async def process_zip(client, message):
 # ===== تابع برای اجرای ربات =====
 async def run_bot():
     """تابعی که ربات را اجرا می‌کند"""
-    global app
+    global app, SELF_ID
     logger.info("Starting user bot...")
     
     app = Client(
@@ -186,7 +230,9 @@ async def run_bot():
     app.on_message(filters.text & non_command)(process_zip)
     
     await app.start()
-    logger.info("Bot started successfully!")
+    me = await app.get_me()
+    SELF_ID = me.id  # برای تشخیص Saved Messages
+    logger.info(f"Bot started as {me.first_name} ({SELF_ID}).")
     
     # منتظر ماندن تا ربات اجرا شود
     await asyncio.Event().wait()
