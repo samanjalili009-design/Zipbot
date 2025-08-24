@@ -264,21 +264,36 @@ async def process_zip(client, message):
 if __name__ == "__main__":
     logger.info("Starting user bot...")
     
-    # ایجاد یک endpoint ساده برای سلامت سرویس
-    from flask import Flask
+    # ایجاد وب سرور ساده برای Render
+    from http.server import HTTPServer, BaseHTTPRequestHandler
     import threading
     
-    web_app = Flask(__name__)
+    class HealthHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == '/health' or self.path == '/':
+                self.send_response(200)
+                self.send_header('Content-type', 'text/plain')
+                self.end_headers()
+                self.wfile.write(b'Bot is running')
+            else:
+                self.send_response(404)
+                self.end_headers()
+                self.wfile.write(b'Not Found')
+        
+        def do_HEAD(self):
+            self.send_response(200)
+            self.end_headers()
     
-    @web_app.route('/health')
-    def health_check():
-        return "Bot is running", 200
-    
-    def run_flask():
+    def run_http_server():
         port = int(os.environ.get("PORT", 10000))
-        web_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+        server = HTTPServer(('0.0.0.0', port), HealthHandler)
+        logger.info(f"HTTP server running on port {port}")
+        server.serve_forever()
     
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
+    # اجرای وب سرور در thread جداگانه
+    http_thread = threading.Thread(target=run_http_server, daemon=True)
+    http_thread.start()
     
+    # اجرای ربات
+    logger.info("Starting Telegram bot...")
     app.run()
