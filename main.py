@@ -173,15 +173,14 @@ class TaskManager:
         else:
             await self.add_task(_send)
 
-# ===== نمونه global =====
-task_manager = TaskManager()
-
 # ===== فانکشن‌های کمکی =====
 def is_user_allowed(user_id: int) -> bool:
     return user_id == ALLOWED_USER_ID
 
 async def safe_send_message(chat_id, text, reply_to_message_id=None, priority=False):
     """ارسال پیام با مدیریت FloodWait"""
+    # ابتدا task_manager رو به صورت global تعریف می‌کنیم
+    global task_manager
     await task_manager.safe_send_message(chat_id, text, reply_to_message_id, priority)
 
 async def safe_download_media(message, file_path, progress=None, progress_args=None):
@@ -194,6 +193,8 @@ async def safe_download_media(message, file_path, progress=None, progress_args=N
     try:
         return await _download()
     except FloodWait as e:
+        # استفاده از task_manager global
+        global task_manager
         task_manager.scheduler.schedule_task(_download, e.value + 10)
         return False
     except Exception as e:
@@ -466,6 +467,8 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
     except FloodWait as e:
         logger.warning(f"⏰ Rescheduling zip task after {e.value} seconds")
         
+        # استفاده از task_manager global
+        global task_manager
         task_manager.scheduler.schedule_task(
             lambda: process_zip_files(user_id, zip_name, chat_id, message_id),
             e.value + 15
@@ -520,6 +523,8 @@ async def upload_zip_part(zip_path, part_number, total_parts, chat_id, message_i
         await asyncio.sleep(random.uniform(5.0, 10.0))
         
     except FloodWait as e:
+        # استفاده از task_manager global
+        global task_manager
         task_manager.scheduler.schedule_task(
             lambda: upload_zip_part(zip_path, part_number, total_parts, chat_id, message_id, password, processing_msg),
             e.value + 10
@@ -538,6 +543,9 @@ def non_command_filter(_, __, message: Message):
             user_states.get(user_id) in ["waiting_password", "waiting_filename"])
 
 non_command = filters.create(non_command_filter)
+
+# ===== ایجاد task_manager به صورت global =====
+task_manager = TaskManager()
 
 # ===== تابع برای اجرای ربات =====
 async def run_bot():
