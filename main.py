@@ -16,8 +16,8 @@ API_ID = 26180086
 API_HASH = "d91e174c7faf0e5a6a3a2ecb0b3361f6"
 SESSION_STRING = "BAGPefYAEAaXaj52wzDLPF0RSfWtF_Slk8nFWzYAHS9vu-HBxRUz9yLnq7m8z-ajYCQxQZO-5aNX0he9OttDjmjieYDMbDjBJtbsOT2ZwsQNe8UCAo5oFPveD5V1H0cIBMlXCG1P49G2oonf1YL1r16Nt34AJLkmzDIoFD0hhxwVBXvrUGwZmEoTtdkfORCYUMGACKO4-Al-NH35oVCkTIqmXQ5DUp9PVx6DND243VW5Xcqay7qwrwfoS4sWRA-7TMXykbHa37ZsdcCOf0VS8e6PyaYvG5BjMCd9BGRnR9IImrksYY2uBM2Bg42MLaa1WFxQtn97p5ViPF9c1MpY49bc5Gm5lwAAAAF--TK5AA"
 ALLOWED_USER_ID = 417536686
-MAX_FILE_SIZE = 4197152000  # 2GB
-MAX_TOTAL_SIZE = 4197152000  # 2GB
+MAX_FILE_SIZE = 4197152000  # 4GB
+MAX_TOTAL_SIZE = 8388608000  # 8GB
 MAX_SPLIT_SIZE = 1990000000  # 1.99GB - برای حاشیه امنیت
 
 # ===== لاگ =====
@@ -90,11 +90,6 @@ async def create_split_zip(files, zip_path, password, processing_msg):
                 else:
                     zipf.write(file_path, file_name)
                     os.remove(file_path)
-                
-                # آپدیت پیشرفت
-                progress_text = f"⏳ در حال فشرده سازی... {i}/{total_files}"
-                try: await processing_msg.edit_text(progress_text)
-                except: pass
                 
         return True
     except Exception as e:
@@ -224,16 +219,14 @@ async def process_zip(client, message):
                         file_msg, 
                         file_path, 
                         progress=progress_bar, 
-                        progress_args=(processing_msg, start_time, "دانلود")
+                        progress_args=(processing_msg, start_time, "دانلود"),
+                        timeout=300  # افزایش timeout برای فایل‌های بزرگ
                     )
                     
                     if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
                         files_to_zip.append({"path": file_path, "name": file_name})
-                    
-                    # آپدیت پیشرفت
-                    progress_text = f"📥 دانلود فایل {i}/{total_files}"
-                    try: await processing_msg.edit_text(progress_text)
-                    except: pass
+                
+                await processing_msg.edit_text("⏳ در حال فشرده‌سازی فایل‌ها...")
                 
                 # ایجاد زیپ
                 zip_file_name = f"{zip_name}.zip"
@@ -251,6 +244,7 @@ async def process_zip(client, message):
                         progress=progress_bar,
                         progress_args=(processing_msg, start_time, "آپلود")
                     )
+                    await processing_msg.delete()  # حذف پیام پردازش
                 else:
                     await message.reply_text("❌ خطایی در ایجاد فایل زیپ رخ داد.")
                     
