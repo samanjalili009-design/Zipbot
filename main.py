@@ -4,8 +4,10 @@ import tempfile
 import pyzipper
 import logging
 import sys
+import threading
 from pyrogram import Client, filters
 from pyrogram.types import Message
+from flask import Flask
 
 # ===== تنظیمات =====
 API_ID = 1867911
@@ -23,7 +25,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ===== کلاینت =====
+# ===== ایجاد برنامه Flask برای Render =====
+web_app = Flask(__name__)
+
+@web_app.route('/')
+def health_check():
+    return "OK", 200
+
+@web_app.route('/health')
+def health():
+    return "Bot is running", 200
+
+# ===== کلاینت Pyrogram =====
 app = Client(
     "user_bot",
     api_id=API_ID,
@@ -173,28 +186,20 @@ async def process_zip(client, message):
         finally:
             user_files[user_id] = []
 
+# ===== تابع برای اجرای ربات در پس‌زمینه =====
+def run_bot():
+    """تابعی که ربات را در پس‌زمینه اجرا می‌کند"""
+    logger.info("Starting user bot in background...")
+    app.run()
+
 # ===== اجرا =====
 if __name__ == "__main__":
-    logger.info("Starting user bot...")
-    
-    # ایجاد یک endpoint ساده برای سلامت سرویس
-    from flask import Flask
-    import threading
-    
-    # ایجاد وب سرور ساده Flask
-    web_app = Flask(__name__)
-    
-    @web_app.route('/health')
-    def health_check():
-        return "Bot is running", 200
-    
-    # اجرای Flask در یک thread جداگانه
-    def run_flask():
-        port = int(os.environ.get("PORT", 10000))
-        web_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
-    
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    
-    # اجرای ربات اصلی
-    app.run()
+    # ربات را در یک thread جداگانه راه‌اندازی کن
+    bot_thread = threading.Thread(target=run_bot)
+    bot_thread.daemon = True
+    bot_thread.start()
+
+    # وب سرور Flask را برای Render اجرا کن
+    port = int(os.environ.get("PORT", 10000))
+    logger.info(f"Starting Flask web server on port {port}...")
+    web_app.run(host="0.0.0.0", port=port)
