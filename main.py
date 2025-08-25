@@ -7,6 +7,8 @@ import sys
 import math
 from pyrogram import Client, filters
 from pyrogram.types import Message
+from flask import Flask
+import threading
 
 # ===== تنظیمات =====
 API_ID = 1867911
@@ -15,7 +17,7 @@ SESSION_STRING = "BAAcgIcAgh6c-Xa01ljkm3Uhy9aG_I2jG2BeLbe6RZoA9nwrVW5se2DgNMOWKl
 ALLOWED_USER_ID = 417536686
 MAX_FILE_SIZE = 2097152000  # 2GB
 MAX_TOTAL_SIZE = 2097152000  # 2GB
-MAX_SPLIT_SIZE = 1990000000  # 1.99GB - کمی کمتر از 2GB برای حاشیه امنیت
+MAX_SPLIT_SIZE = 1990000000  # 1.99GB
 
 # ===== لاگ =====
 logging.basicConfig(
@@ -24,6 +26,17 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
+
+# ===== Flask برای health check =====
+web_app = Flask(__name__)
+
+@web_app.route('/')
+def health_check():
+    return "Bot is running", 200
+
+def run_flask():
+    port = int(os.environ.get("PORT", 5000))
+    web_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 # ===== کلاینت =====
 app = Client(
@@ -40,16 +53,43 @@ waiting_for_password = {}
 waiting_for_filename = {}
 zip_password_storage = {}
 
-# ===== فانکشن‌های جدید برای تقسیم فایل =====
+# ===== فانکشن‌های کمکی =====
+def is_user_allowed(user_id: int) -> bool:
+    return user_id == ALLOWED_USER_ID
+
+async def progress_bar(current, total, message: Message, start_time, stage="دانلود"):
+    now = time.time()
+    diff = now - start_time
+    if diff == 0: 
+        diff = 1
+    percent = current * 100 / total
+    speed = current / diff
+    eta = (total - current) / speed if speed > 0 else 0
+    bar_filled = int(percent / 5)
+    bar = "▓" * bar_filled + "░" * (20 - bar_filled)
+    
+    text = f"""
+🚀 {stage} فایل...
+
+{bar} {int(percent)}%
+
+📦 {current//1024//1024}MB / {total//1024//1024}MB
+⚡️ سرعت: {speed/1024/1024:.2f} MB/s
+⏳ زمان باقی‌مانده: {int(eta)}s
+    """
+    try: 
+        await message.edit_text(text)
+    except: 
+        pass
+
 async def split_large_file(file_path, max_size=MAX_SPLIT_SIZE):
     """تقسیم فایل به چند part"""
     part_files = []
     file_size = os.path.getsize(file_path)
     
     if file_size <= max_size:
-        return [file_path]  # نیازی به تقسیم نیست
+        return [file_path]
     
-    # محاسبه تعداد partهای مورد نیاز
     num_parts = math.ceil(file_size / max_size)
     base_name = os.path.basename(file_path)
     
@@ -69,7 +109,7 @@ async def split_large_file(file_path, max_size=MAX_SPLIT_SIZE):
             part_files.append(part_path)
             part_num += 1
     
-    os.remove(file_path)  # فایل اصلی را پاک کن
+    os.remove(file_path)
     return part_files
 
 async def create_split_zip(files, zip_path, password, processing_msg):
@@ -83,51 +123,26 @@ async def create_split_zip(files, zip_path, password, processing_msg):
                 file_path = file_info["path"]
                 file_name = file_info["name"]
                 
-                # اگر فایل بزرگ است، آن را تقسیم کن
                 if os.path.getsize(file_path) > MAX_SPLIT_SIZE:
                     parts = await split_large_file(file_path)
                     for part_path in parts:
                         part_name = os.path.basename(part_path)
                         zipf.write(part_path, part_name)
-                        os.remove(part_path)  # part را بعد از اضافه کردن پاک کن
+                        os.remove(part_path)
                 else:
                     zipf.write(file_path, file_name)
                     os.remove(file_path)
                 
-                # آپدیت پیشرفت
                 progress_text = f"⏳ در حال فشرده سازی... {i}/{total_files}"
-                try: await processing_msg.edit_text(progress_text)
-                except: pass
+                try: 
+                    await processing_msg.edit_text(progress_text)
+                except: 
+                    pass
                 
         return True
     except Exception as e:
         logger.error(f"Error creating split zip: {e}")
         return False
-
-# ===== فانکشن‌های موجود =====
-def is_user_allowed(user_id: int) -> bool:
-    return user_id == ALLOWED_USER_ID
-
-async def progress_bar(current, total, message: Message, start_time, stage="دانلود"):
-    now = time.time()
-    diff = now - start_time
-    if diff == 0: diff = 1
-    percent = int(current * 100 / total)
-    speed = current / diff
-    eta = int((total - current) / speed) if speed > 0 else 0
-    bar_filled = int(percent / 5)
-    bar = "▓" * bar_filled + "░" * (20 - bar_filled)
-    text = f"""
-🚀 {stage} فایل...
-
-{bar} {percent}%
-
-📦 {current//1024//1024}MB / {total//1024//1024}MB
-⚡️ سرعت: {round(speed/1024,2)} KB/s
-⏳ زمان باقی‌مانده: {eta}s
-    """
-    try: await message.edit_text(text)
-    except: pass
 
 # ===== هندلرها =====
 @app.on_message(filters.command("start"))
@@ -157,60 +172,60 @@ async def handle_file(client, message):
         password = caption.split("pass=",1)[1].split()[0].strip()
     
     user_id = message.from_user.id
-    if user_id not in user_files: user_files[user_id] = []
-    user_files[user_id].append({"message": message, "file_name": file_name, "password": password, "file_size": doc.file_size})
+    if user_id not in user_files: 
+        user_files[user_id] = []
+    user_files[user_id].append({
+        "message": message, 
+        "file_name": file_name, 
+        "password": password, 
+        "file_size": doc.file_size
+    })
 
 @app.on_message(filters.command("zip"))
 async def start_zip(client, message):
-    if not is_user_allowed(message.from_user.id): return
+    if not is_user_allowed(message.from_user.id): 
+        return
     user_id = message.from_user.id
     if user_id not in user_files or not user_files[user_id]:
         return await message.reply_text("❌ هیچ فایلی برای زیپ کردن وجود ندارد.")
     
-    total_size = sum(f["file_size"] for f in user_files[user_id])
     await message.reply_text("🔐 لطفاً رمز عبور برای فایل زیپ وارد کن:\n❌ برای لغو /cancel را بزنید")
     waiting_for_password[user_id] = True
 
 @app.on_message(filters.command("cancel"))
 async def cancel_zip(client, message):
     user_id = message.from_user.id
-    if user_id in user_files: user_files[user_id] = []
-    waiting_for_password.pop(user_id,None)
-    waiting_for_filename.pop(user_id,None)
-    zip_password_storage.pop(user_id,None)
+    if user_id in user_files: 
+        user_files[user_id] = []
+    waiting_for_password.pop(user_id, None)
+    waiting_for_filename.pop(user_id, None)
+    zip_password_storage.pop(user_id, None)
     await message.reply_text("❌ عملیات لغو شد.")
 
-# ===== هندلر برای پسورد و اسم فایل =====
-def non_command_filter(_, __, message: Message):
-    return message.text and not message.text.startswith('/')
-non_command = filters.create(non_command_filter)
-
-@app.on_message(filters.text & non_command)
+@app.on_message(filters.text & ~filters.command)
 async def process_zip(client, message):
     user_id = message.from_user.id
     
-    # مرحله پسورد
     if user_id in waiting_for_password and waiting_for_password[user_id]:
         zip_password = message.text.strip()
         if not zip_password:
             return await message.reply_text("❌ رمز عبور نمی‌تواند خالی باشد.")
         zip_password_storage[user_id] = zip_password
-        waiting_for_password.pop(user_id,None)
+        waiting_for_password[user_id] = False
         waiting_for_filename[user_id] = True
         return await message.reply_text("📝 حالا اسم فایل زیپ نهایی را وارد کن (بدون .zip)")
     
-    # مرحله اسم فایل
     if user_id in waiting_for_filename and waiting_for_filename[user_id]:
         zip_name = message.text.strip()
         if not zip_name:
             return await message.reply_text("❌ اسم فایل نمی‌تواند خالی باشد.")
-        waiting_for_filename.pop(user_id,None)
-        processing_msg = await message.reply_text("⏳ در حال ایجاد فایل زیپ...")
-        zip_password = zip_password_storage.pop(user_id,None)
+        waiting_for_filename.pop(user_id, None)
         
         try:
+            processing_msg = await message.reply_text("⏳ در حال ایجاد فایل زیپ...")
+            zip_password = zip_password_storage.pop(user_id, None)
+            
             with tempfile.TemporaryDirectory() as tmp_dir:
-                # دانلود همه فایل‌ها
                 files_to_zip = []
                 total_files = len(user_files[user_id])
                 
@@ -223,34 +238,36 @@ async def process_zip(client, message):
                     await client.download_media(
                         file_msg, 
                         file_path, 
-                        progress=progress_bar, 
-                        progress_args=(processing_msg, start_time, "دانلود")
+                        progress=lambda current, total: progress_bar(
+                            current, total, processing_msg, start_time, "دانلود"
+                        )
                     )
                     
                     if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
                         files_to_zip.append({"path": file_path, "name": file_name})
                     
-                    # آپدیت پیشرفت
                     progress_text = f"📥 دانلود فایل {i}/{total_files}"
-                    try: await processing_msg.edit_text(progress_text)
-                    except: pass
+                    try: 
+                        await processing_msg.edit_text(progress_text)
+                    except: 
+                        pass
                 
-                # ایجاد زیپ
                 zip_file_name = f"{zip_name}.zip"
                 zip_path = os.path.join(tmp_dir, zip_file_name)
                 
                 success = await create_split_zip(files_to_zip, zip_path, zip_password, processing_msg)
                 
                 if success and os.path.exists(zip_path):
-                    # آپلود زیپ
                     start_time = time.time()
                     await client.send_document(
                         message.chat.id,
                         zip_path,
                         caption=f"✅ فایل زیپ آماده شد!\n🔑 رمز: `{zip_password}`\n📦 تعداد فایل‌ها: {total_files}",
-                        progress=progress_bar,
-                        progress_args=(processing_msg, start_time, "آپلود")
+                        progress=lambda current, total: progress_bar(
+                            current, total, processing_msg, start_time, "آپلود"
+                        )
                     )
+                    await processing_msg.delete()
                 else:
                     await message.reply_text("❌ خطایی در ایجاد فایل زیپ رخ داد.")
                     
@@ -264,20 +281,7 @@ async def process_zip(client, message):
 if __name__ == "__main__":
     logger.info("Starting user bot...")
     
-    # ایجاد یک endpoint ساده برای سلامت سرویس
-    from flask import Flask
-    import threading
-    
-    web_app = Flask(__name__)
-    
-    @web_app.route('/health')
-    def health_check():
-        return "Bot is running", 200
-    
-    def run_flask():
-        port = int(os.environ.get("PORT", 10000))
-        web_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
-    
+    # راه اندازی Flask در thread جداگانه
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     
