@@ -57,13 +57,18 @@ async def progress_bar(current, total, message: Message, start_time, stage="دا
 ⚡️ سرعت: {round(speed/1024,2)} KB/s
 ⏳ زمان باقی‌مانده: {eta}s
     """
-    try: await message.edit_text(text)
-    except: pass
+    try: 
+        await message.edit_text(text)
+        await asyncio.sleep(0.1)  # تاخیر برای جلوگیری از FloodWait
+    except: 
+        pass
 
 # ===== هندلرها =====
 async def start(client, message):
     if not is_user_allowed(message.from_user.id):
         return await message.reply_text("❌ دسترسی denied.")
+    
+    await asyncio.sleep(0.1)  # تاخیر برای جلوگیری از FloodWait
     await message.reply_text(
         "سلام 👋\nفایل‌تو بفرست تا برات زیپ کنم.\n"
         "💡 کپشن فایل = pass=رمز برای تعیین پسورد (اختیاری)\n"
@@ -71,98 +76,172 @@ async def start(client, message):
         f"📦 حداکثر حجم کل: {MAX_TOTAL_SIZE//1024//1024}MB\n"
         "بعد از ارسال فایل‌ها دستور /zip رو بزن تا ابتدا پسورد و سپس اسم فایل نهایی را وارد کنی."
     )
+    await asyncio.sleep(0.1)
 
 async def handle_file(client, message):
     if not is_user_allowed(message.from_user.id):
         return
+    
     doc = message.document
     if not doc:
         return
+    
     file_name = doc.file_name or f"file_{message.id}"
     caption = message.caption or ""
     password = None
+    
     if "pass=" in caption:
         password = caption.split("pass=",1)[1].split()[0].strip()
+    
     if doc.file_size > MAX_FILE_SIZE:
+        await asyncio.sleep(0.1)
         return await message.reply_text(f"❌ حجم فایل بیش از حد مجاز است! ({MAX_FILE_SIZE//1024//1024}MB)")
+    
     user_id = message.from_user.id
-    if user_id not in user_files: user_files[user_id] = []
-    user_files[user_id].append({"message": message, "file_name": file_name, "password": password, "file_size": doc.file_size})
+    if user_id not in user_files: 
+        user_files[user_id] = []
+    
+    user_files[user_id].append({
+        "message": message, 
+        "file_name": file_name, 
+        "password": password, 
+        "file_size": doc.file_size
+    })
+    
+    await asyncio.sleep(0.1)
+    await message.reply_text(f"✅ فایل '{file_name}' ذخیره شد. برای شروع زیپ /zip را بزنید.")
+    await asyncio.sleep(0.1)
 
 async def start_zip(client, message):
-    if not is_user_allowed(message.from_user.id): return
+    if not is_user_allowed(message.from_user.id): 
+        return
+    
     user_id = message.from_user.id
     if user_id not in user_files or not user_files[user_id]:
-        return await message.reply_text("❌ هیچ فایلی برای زیپ کردن وجود ندارد.")
+        await asyncio.sleep(0.1)
+        await message.reply_text("❌ هیچ فایلی برای زیپ کردن وجود ندارد.")
+        await asyncio.sleep(0.1)
+        return
+    
     total_size = sum(f["file_size"] for f in user_files[user_id])
     if total_size > MAX_TOTAL_SIZE:
+        await asyncio.sleep(0.1)
         await message.reply_text(f"❌ حجم کل فایل‌ها بیش از حد مجاز است! ({MAX_TOTAL_SIZE//1024//1024}MB)")
         user_files[user_id] = []
+        await asyncio.sleep(0.1)
         return
-    await message.reply_text("🔐 لطفاً رمز عبور برای فایل زیپ وارد کن:\n❌ برای لغو /cancel را بزنید")
+    
     waiting_for_password[user_id] = True
+    await asyncio.sleep(0.1)
+    await message.reply_text("🔐 لطفاً رمز عبور برای فایل زیپ وارد کن:\n❌ برای لغو /cancel را بزنید")
+    await asyncio.sleep(0.1)
 
 async def cancel_zip(client, message):
     user_id = message.from_user.id
-    if user_id in user_files: user_files[user_id] = []
-    waiting_for_password.pop(user_id,None)
-    waiting_for_filename.pop(user_id,None)
-    zip_password_storage.pop(user_id,None)
+    if user_id in user_files: 
+        user_files[user_id] = []
+    
+    waiting_for_password.pop(user_id, None)
+    waiting_for_filename.pop(user_id, None)
+    zip_password_storage.pop(user_id, None)
+    
+    await asyncio.sleep(0.1)
     await message.reply_text("❌ عملیات لغو شد.")
+    await asyncio.sleep(0.1)
 
 def non_command_filter(_, __, message: Message):
-    return message.text and not message.text.startswith('/')
+    return (message.text and 
+            not message.text.startswith('/') and 
+            (message.from_user.id in waiting_for_password or 
+             message.from_user.id in waiting_for_filename))
+
 non_command = filters.create(non_command_filter)
 
 async def process_zip(client, message):
     user_id = message.from_user.id
+    
+    # فقط اگر کاربر در حالت انتظار است پردازش کن
+    if user_id not in waiting_for_password and user_id not in waiting_for_filename:
+        return
+    
+    await asyncio.sleep(0.1)  # تاخیر برای جلوگیری از FloodWait
+    
     # مرحله پسورد
-    if user_id in waiting_for_password and waiting_for_password[user_id]:
+    if user_id in waiting_for_password:
         zip_password = message.text.strip()
         if not zip_password:
-            return await message.reply_text("❌ رمز عبور نمی‌تواند خالی باشد.")
+            await message.reply_text("❌ رمز عبور نمی‌تواند خالی باشد.")
+            await asyncio.sleep(0.1)
+            return
+        
         zip_password_storage[user_id] = zip_password
-        waiting_for_password.pop(user_id,None)
+        del waiting_for_password[user_id]
         waiting_for_filename[user_id] = True
-        return await message.reply_text("📝 حالا اسم فایل زیپ نهایی را وارد کن (بدون .zip)")
+        
+        await message.reply_text("📝 حالا اسم فایل زیپ نهایی را وارد کن (بدون .zip)")
+        await asyncio.sleep(0.1)
+        return
     
     # مرحله اسم فایل
-    if user_id in waiting_for_filename and waiting_for_filename[user_id]:
+    if user_id in waiting_for_filename:
         zip_name = message.text.strip()
         if not zip_name:
-            return await message.reply_text("❌ اسم فایل نمی‌تواند خالی باشد.")
-        waiting_for_filename.pop(user_id,None)
+            await message.reply_text("❌ اسم فایل نمی‌تواند خالی باشد.")
+            await asyncio.sleep(0.1)
+            return
+        
+        del waiting_for_filename[user_id]
         processing_msg = await message.reply_text("⏳ در حال ایجاد فایل زیپ...")
-        zip_password = zip_password_storage.pop(user_id,None)
+        await asyncio.sleep(0.1)
+        
+        zip_password = zip_password_storage.pop(user_id, None)
+        
         try:
             with tempfile.TemporaryDirectory() as tmp_dir:
                 zip_file_name = f"{zip_name}.zip"
                 zip_path = os.path.join(tmp_dir, zip_file_name)
-                with pyzipper.AESZipFile(zip_path,"w",compression=pyzipper.ZIP_DEFLATED,encryption=pyzipper.WZ_AES) as zipf:
-                    zipf.setpassword(zip_password.encode())
+                
+                with pyzipper.AESZipFile(zip_path, "w", compression=pyzipper.ZIP_DEFLATED, encryption=pyzipper.WZ_AES) as zipf:
+                    if zip_password:
+                        zipf.setpassword(zip_password.encode())
+                    
                     total_files = len(user_files[user_id])
-                    for i, finfo in enumerate(user_files[user_id],1):
+                    for i, finfo in enumerate(user_files[user_id], 1):
                         file_msg = finfo["message"]
                         file_name = finfo["file_name"]
-                        file_path = os.path.join(tmp_dir,file_name)
+                        file_path = os.path.join(tmp_dir, file_name)
+                        
                         start_time = time.time()
-                        await client.download_media(file_msg,file_path,progress=progress_bar,progress_args=(processing_msg,start_time,"دانلود"))
-                        if os.path.exists(file_path) and os.path.getsize(file_path)>0:
-                            zipf.write(file_path,file_name)
+                        await client.download_media(
+                            file_msg, 
+                            file_path, 
+                            progress=progress_bar, 
+                            progress_args=(processing_msg, start_time, "دانلود")
+                        )
+                        
+                        if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+                            zipf.write(file_path, file_name)
+                        
                         os.remove(file_path)
+                        await asyncio.sleep(0.1)  # تاخیر بین دانلود فایل‌ها
+                
                 start_time = time.time()
                 await client.send_document(
                     message.chat.id,
                     zip_path,
                     caption=f"✅ فایل زیپ آماده شد!\n🔑 رمز: `{zip_password}`\n📦 تعداد فایل‌ها: {total_files}",
                     progress=progress_bar,
-                    progress_args=(processing_msg,start_time,"آپلود")
+                    progress_args=(processing_msg, start_time, "آپلود")
                 )
+                await asyncio.sleep(0.1)
+                
         except Exception as e:
-            logger.error(f"Error in zip: {e}",exc_info=True)
+            logger.error(f"Error in zip: {e}", exc_info=True)
             await message.reply_text("❌ خطایی رخ داد.")
+            await asyncio.sleep(0.1)
         finally:
-            user_files[user_id] = []
+            if user_id in user_files:
+                user_files[user_id] = []
 
 # ===== تابع برای اجرای ربات =====
 async def run_bot():
