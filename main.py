@@ -160,7 +160,7 @@ async def start_zip(client: Client, message: Message):
     if not is_user_allowed(user_id): return
     if user_id not in user_files or not user_files[user_id]: return await message.reply_text("❌ فایل برای زیپ وجود ندارد")
     total_size = sum(f.get("file_size",0) for f in user_files[user_id])
-    if total_size > MAX_TOTAL_SIZE: user_files[user_id] = []; return await message.reply_text("❌ حجم کل فایل‌ها زیاد است")
+    if total_size > MAX_TOTAL_SIZE: user_files[user_id] = [] ; return await message.reply_text("❌ حجم کل فایل‌ها زیاد است")
     waiting_for_password[user_id] = True
     await message.reply_text("🔐 رمز زیپ را وارد کن /cancel برای لغو")
 
@@ -233,16 +233,25 @@ async def run_bot():
 
 if __name__ == "__main__":
     web_app=Flask(__name__)
-    @web_app.route('/'): lambda : ("Bot is running",200)
-    @web_app.route('/health'): lambda : ("OK",200)
+
+    @web_app.route('/')
+    def home():
+        return "Bot is running", 200
+
+    @web_app.route('/health')
+    def health_check():
+        return "OK", 200
+
     def start_bot_thread():
         loop=asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try: loop.run_until_complete(run_bot())
         except Exception as e: logger.error(f"Bot error: {e}")
         finally: loop.close()
+
     t=threading.Thread(target=start_bot_thread,daemon=True)
     t.start()
+
     port=int(os.environ.get("PORT",10000))
     logger.info(f"Starting Flask server on port {port}")
     web_app.run(host="0.0.0.0",port=port,debug=False,use_reloader=False)
