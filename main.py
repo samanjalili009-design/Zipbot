@@ -4,21 +4,16 @@ import tempfile
 import pyzipper
 import logging
 import sys
-import asyncio
-import math
 from pyrogram import Client, filters
 from pyrogram.types import Message
-from flask import Flask
-import threading
 
 # ===== تنظیمات =====
-API_ID = 26180086
-API_HASH = "d91e174c7faf0e5a6a3a2ecb0b3361f6"
-SESSION_STRING = "BAGPefYAEAaXaj52wzDLPF0RSfWtF_Slk8nFWzYAHS9vu-HBxRUz9yLnq7m8z-ajYCQxQZO-5aNX0he9OttDjmjieYDMbDjBJtbsOT2ZwsQNe8UCAo5oFPveD5V1H0cIBMlXCG1P49G2oonf1YL1r16Nt34AJLkmzDIoFD0hhxwVBXvrUGwZmEoTtdkfORCYUMGACKO4-Al-NH35oVCkTIqmXQ5DUp9PVx6DND243VW5Xcqay7qwrwfoS4sWRA-7TMXykbHa37ZsdcCOf0VS8e6PyaYvG5BjMCd9BGRnR9IImrksYY2uBM2Bg42MLaa1WFxQtn97p5ViPF9c1MpY49bc5Gm5lwAAAAF--TK5AA"
+API_ID = 2487823
+API_HASH = "3ba2af01cad4bdd6138d15e353096e3f"
+SESSION_STRING = "BAAcgIcAbm3Hdroaq-gHzwTUhklM4QhrzHSHm1uy_ZeMKXDmDamwhqFNGhK9zG_ZwyxF50TxLgez_a6zJ738_-qHLofVT3dgQCSdBHLuKPm39X46lRk1omWxBtmUEIpNzVZZJqEnyP32szYrHFkNx5IexSIyKWPURIx92AUeqBD6VKDRZJxs61Gq0U0-FSykY0a5sjEXp-3Mmz07sL7RYbCraYsdTsYx9n1EL1Bmg7IT-xpWeWpaEa0u4cmTkfJxpY03WwYDZ1J4zuCsYCNsauQrS2w7r3M6bNdTBAUIHPF8kSttPhnwEEFJQK-kLeK0aslMI-LzMhqS7nfR5fIhNM4wxFAHOAAAAAAK4sD3AA"
 ALLOWED_USER_ID = 417536686
-MAX_FILE_SIZE = 4197152000  # 4GB
-MAX_TOTAL_SIZE = 8388608000  # 8GB
-MAX_SPLIT_SIZE = 1990000000  # 1.99GB - برای حاشیه امنیت
+MAX_FILE_SIZE = 2097152000  # 2GB
+MAX_TOTAL_SIZE = 2097152000  # 2GB
 
 # ===== لاگ =====
 logging.basicConfig(
@@ -28,8 +23,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ===== کلاینت Pyrogram =====
-app = None
+# ===== کلاینت =====
+app = Client(
+    "user_bot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    session_string=SESSION_STRING,
+    in_memory=True
+)
 
 # ===== داده‌ها =====
 user_files = {}
@@ -37,80 +38,7 @@ waiting_for_password = {}
 waiting_for_filename = {}
 zip_password_storage = {}
 
-# ===== فانکشن‌های جدید برای تقسیم فایل =====
-async def split_large_file(file_path, max_size=MAX_SPLIT_SIZE):
-    """تقسیم فایل به چند part"""
-    part_files = []
-    file_size = os.path.getsize(file_path)
-    
-    if file_size <= max_size:
-        return [file_path]  # نیازی به تقسیم نیست
-    
-    # محاسبه تعداد partهای مورد نیاز
-    num_parts = math.ceil(file_size / max_size)
-    base_name = os.path.basename(file_path)
-    
-    with open(file_path, 'rb') as f:
-        part_num = 1
-        while True:
-            chunk = f.read(max_size)
-            if not chunk:
-                break
-                
-            part_filename = f"{base_name}.part{part_num:03d}"
-            part_path = os.path.join(os.path.dirname(file_path), part_filename)
-            
-            with open(part_path, 'wb') as part_file:
-                part_file.write(chunk)
-            
-            part_files.append(part_path)
-            part_num += 1
-    
-    os.remove(file_path)  # فایل اصلی را پاک کن
-    return part_files
-
-async def create_split_zip(files, zip_path, password, processing_msg):
-    """ایجاد زیپ تقسیم شده با مدیریت حافظه"""
-    try:
-        with pyzipper.AESZipFile(zip_path, "w", compression=pyzipper.ZIP_DEFLATED, encryption=pyzipper.WZ_AES) as zipf:
-            zipf.setpassword(password.encode())
-            
-            total_files = len(files)
-            for i, file_info in enumerate(files, 1):
-                file_path = file_info["path"]
-                file_name = file_info["name"]
-                
-                # اگر فایل بزرگ است، آن را تقسیم کن
-                if os.path.getsize(file_path) > MAX_SPLIT_SIZE:
-                    parts = await split_large_file(file_path)
-                    for part_path in parts:
-                        part_name = os.path.basename(part_path)
-                        # اضافه کردن part به زیپ با chunking
-                        with open(part_path, 'rb') as f:
-                            with zipf.open(part_name, 'w') as zip_file:
-                                while True:
-                                    chunk = f.read(8192)  # 8KB chunks
-                                    if not chunk:
-                                        break
-                                    zip_file.write(chunk)
-                        os.remove(part_path)
-                else:
-                    # اضافه کردن فایل معمولی با chunking
-                    with open(file_path, 'rb') as f:
-                        with zipf.open(file_name, 'w') as zip_file:
-                            while True:
-                                chunk = f.read(8192)  # 8KB chunks
-                                if not chunk:
-                                    break
-                                zip_file.write(chunk)
-                    os.remove(file_path)
-                
-        return True
-    except Exception as e:
-        logger.error(f"Error creating split zip: {e}")
-        return False
-
-# ===== فانکشن‌های اصلی =====
+# ===== فانکشن‌ها =====
 def is_user_allowed(user_id: int) -> bool:
     return user_id == ALLOWED_USER_ID
 
@@ -136,18 +64,19 @@ async def progress_bar(current, total, message: Message, start_time, stage="دا
     except: pass
 
 # ===== هندلرها =====
+@app.on_message(filters.command("start"))
 async def start(client, message):
     if not is_user_allowed(message.from_user.id):
         return await message.reply_text("❌ دسترسی denied.")
     await message.reply_text(
         "سلام 👋\nفایل‌تو بفرست تا برات زیپ کنم.\n"
         "💡 کپشن فایل = pass=رمز برای تعیین پسورد (اختیاری)\n"
-        f"📦 حداکثر حجم هر فایل: نامحدود (فایل‌های بزرگ به صورت خودکار تقسیم می‌شوند)\n"
+        f"📦 حداکثر حجم هر فایل: {MAX_FILE_SIZE//1024//1024}MB\n"
         f"📦 حداکثر حجم کل: {MAX_TOTAL_SIZE//1024//1024}MB\n"
-        "🔧 فایل‌های بزرگتر از 2GB به صورت خودکار تقسیم می‌شوند\n"
         "بعد از ارسال فایل‌ها دستور /zip رو بزن تا ابتدا پسورد و سپس اسم فایل نهایی را وارد کنی."
     )
 
+@app.on_message(filters.document)
 async def handle_file(client, message):
     if not is_user_allowed(message.from_user.id):
         return
@@ -159,30 +88,27 @@ async def handle_file(client, message):
     password = None
     if "pass=" in caption:
         password = caption.split("pass=",1)[1].split()[0].strip()
-    
+    if doc.file_size > MAX_FILE_SIZE:
+        return await message.reply_text(f"❌ حجم فایل بیش از حد مجاز است! ({MAX_FILE_SIZE//1024//1024}MB)")
     user_id = message.from_user.id
     if user_id not in user_files: user_files[user_id] = []
     user_files[user_id].append({"message": message, "file_name": file_name, "password": password, "file_size": doc.file_size})
-    
-    # پیام تأیید دریافت فایل
-    size_mb = doc.file_size // 1024 // 1024
-    await message.reply_text(f"✅ فایل دریافت شد: {file_name}\n📦 حجم: {size_mb}MB")
 
+@app.on_message(filters.command("zip"))
 async def start_zip(client, message):
     if not is_user_allowed(message.from_user.id): return
     user_id = message.from_user.id
     if user_id not in user_files or not user_files[user_id]:
         return await message.reply_text("❌ هیچ فایلی برای زیپ کردن وجود ندارد.")
-    
     total_size = sum(f["file_size"] for f in user_files[user_id])
     if total_size > MAX_TOTAL_SIZE:
         await message.reply_text(f"❌ حجم کل فایل‌ها بیش از حد مجاز است! ({MAX_TOTAL_SIZE//1024//1024}MB)")
         user_files[user_id] = []
         return
-        
     await message.reply_text("🔐 لطفاً رمز عبور برای فایل زیپ وارد کن:\n❌ برای لغو /cancel را بزنید")
     waiting_for_password[user_id] = True
 
+@app.on_message(filters.command("cancel"))
 async def cancel_zip(client, message):
     user_id = message.from_user.id
     if user_id in user_files: user_files[user_id] = []
@@ -191,13 +117,14 @@ async def cancel_zip(client, message):
     zip_password_storage.pop(user_id,None)
     await message.reply_text("❌ عملیات لغو شد.")
 
+# ===== هندلر برای پسورد و اسم فایل =====
 def non_command_filter(_, __, message: Message):
     return message.text and not message.text.startswith('/')
 non_command = filters.create(non_command_filter)
 
+@app.on_message(filters.text & non_command)
 async def process_zip(client, message):
     user_id = message.from_user.id
-    
     # مرحله پسورد
     if user_id in waiting_for_password and waiting_for_password[user_id]:
         zip_password = message.text.strip()
@@ -216,117 +143,58 @@ async def process_zip(client, message):
         waiting_for_filename.pop(user_id,None)
         processing_msg = await message.reply_text("⏳ در حال ایجاد فایل زیپ...")
         zip_password = zip_password_storage.pop(user_id,None)
-        
         try:
             with tempfile.TemporaryDirectory() as tmp_dir:
-                # دانلود همه فایل‌ها
-                files_to_zip = []
-                total_files = len(user_files[user_id])
-                
-                for i, finfo in enumerate(user_files[user_id], 1):
-                    file_msg = finfo["message"]
-                    file_name = finfo["file_name"]
-                    file_path = os.path.join(tmp_dir, file_name)
-                    
-                    start_time = time.time()
-                    await client.download_media(
-                        file_msg, 
-                        file_path, 
-                        progress=progress_bar, 
-                        progress_args=(processing_msg, start_time, "دانلود"),
-                        timeout=300
-                    )
-                    
-                    if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
-                        files_to_zip.append({"path": file_path, "name": file_name})
-                
-                await processing_msg.edit_text("⏳ در حال فشرده‌سازی فایل‌ها...")
-                
-                # ایجاد زیپ
                 zip_file_name = f"{zip_name}.zip"
                 zip_path = os.path.join(tmp_dir, zip_file_name)
-                
-                success = await create_split_zip(files_to_zip, zip_path, zip_password, processing_msg)
-                
-                if success and os.path.exists(zip_path):
-                    # آپلود زیپ
-                    start_time = time.time()
-                    await client.send_document(
-                        message.chat.id,
-                        zip_path,
-                        caption=f"✅ فایل زیپ آماده شد!\n🔑 رمز: `{zip_password}`\n📦 تعداد فایل‌ها: {total_files}",
-                        progress=progress_bar,
-                        progress_args=(processing_msg, start_time, "آپلود")
-                    )
-                    await processing_msg.delete()
-                else:
-                    await message.reply_text("❌ خطایی در ایجاد فایل زیپ رخ داد.")
-                    
+                with pyzipper.AESZipFile(zip_path,"w",compression=pyzipper.ZIP_DEFLATED,encryption=pyzipper.WZ_AES) as zipf:
+                    zipf.setpassword(zip_password.encode())
+                    total_files = len(user_files[user_id])
+                    for i, finfo in enumerate(user_files[user_id],1):
+                        file_msg = finfo["message"]
+                        file_name = finfo["file_name"]
+                        file_path = os.path.join(tmp_dir,file_name)
+                        start_time = time.time()
+                        await client.download_media(file_msg,file_path,progress=progress_bar,progress_args=(processing_msg,start_time,"دانلود"))
+                        if os.path.exists(file_path) and os.path.getsize(file_path)>0:
+                            zipf.write(file_path,file_name)
+                        os.remove(file_path)
+                start_time = time.time()
+                await client.send_document(
+                    message.chat.id,
+                    zip_path,
+                    caption=f"✅ فایل زیپ آماده شد!\n🔑 رمز: `{zip_password}`\n📦 تعداد فایل‌ها: {total_files}",
+                    progress=progress_bar,
+                    progress_args=(processing_msg,start_time,"آپلود")
+                )
         except Exception as e:
-            logger.error(f"Error in zip process: {e}", exc_info=True)
-            error_msg = f"❌ خطایی رخ داد: {str(e)}"
-            if "memory" in str(e).lower():
-                error_msg = "❌ حافظه کافی نیست! لطفاً فایل‌های کوچکتری ارسال کنید."
-            elif "timeout" in str(e).lower():
-                error_msg = "❌ زمان عملیات به پایان رسید! لطفاً دوباره تلاش کنید."
-            
-            await message.reply_text(error_msg)
+            logger.error(f"Error in zip: {e}",exc_info=True)
+            await message.reply_text("❌ خطایی رخ داد.")
         finally:
             user_files[user_id] = []
 
-# ===== تابع برای اجرای ربات =====
-async def run_bot():
-    """تابعی که ربات را اجرا می‌کند"""
-    global app
-    logger.info("Starting user bot...")
-    
-    app = Client(
-        "user_bot",
-        api_id=API_ID,
-        api_hash=API_HASH,
-        session_string=SESSION_STRING,
-        in_memory=True
-    )
-    
-    # اضافه کردن هندلرها
-    app.on_message(filters.command("start"))(start)
-    app.on_message(filters.document)(handle_file)
-    app.on_message(filters.command("zip"))(start_zip)
-    app.on_message(filters.command("cancel"))(cancel_zip)
-    app.on_message(filters.text & non_command)(process_zip)
-    
-    await app.start()
-    logger.info("Bot started successfully!")
-    
-    # منتظر ماندن تا ربات اجرا شود
-    await asyncio.Event().wait()
-
 # ===== اجرا =====
 if __name__ == "__main__":
-    # ایجاد وب سرور Flask
-    web_app = Flask(__name__)
+    logger.info("Starting user bot...")
     
-    @web_app.route('/')
-    def home():
-        return "Bot is running", 200
+    # ایجاد یک endpoint ساده برای سلامت سرویس
+    from flask import Flask
+    import threading
+    
+    # ایجاد وب سرور ساده Flask
+    web_app = Flask(__name__)
     
     @web_app.route('/health')
     def health_check():
         return "Bot is running", 200
     
-    # اجرای ربات در یک thread جداگانه
-    def start_bot():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(run_bot())
-        except Exception as e:
-            logger.error(f"Bot error: {e}")
+    # اجرای Flask در یک thread جداگانه
+    def run_flask():
+        port = int(os.environ.get("PORT", 10000))
+        web_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
     
-    bot_thread = threading.Thread(target=start_bot, daemon=True)
-    bot_thread.start()
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
     
-    # اجرای Flask در thread اصلی
-    port = int(os.environ.get("PORT", 10000))
-    logger.info(f"Starting Flask web server on port {port}...")
-    web_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+    # اجرای ربات اصلی
+    app.run()
