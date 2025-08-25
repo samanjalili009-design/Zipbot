@@ -5,6 +5,7 @@ import pyzipper
 import logging
 import sys
 import math
+import asyncio
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from flask import Flask
@@ -57,29 +58,13 @@ zip_password_storage = {}
 def is_user_allowed(user_id: int) -> bool:
     return user_id == ALLOWED_USER_ID
 
-async def progress_bar(current, total, message: Message, start_time, stage="دانلود"):
-    now = time.time()
-    diff = now - start_time
-    if diff == 0: 
-        diff = 1
-    percent = current * 100 / total
-    speed = current / diff
-    eta = (total - current) / speed if speed > 0 else 0
-    bar_filled = int(percent / 5)
-    bar = "▓" * bar_filled + "░" * (20 - bar_filled)
-    
-    text = f"""
-🚀 {stage} فایل...
-
-{bar} {int(percent)}%
-
-📦 {current//1024//1024}MB / {total//1024//1024}MB
-⚡️ سرعت: {speed/1024/1024:.2f} MB/s
-⏳ زمان باقی‌مانده: {int(eta)}s
-    """
-    try: 
+async def simple_progress(current, total, message: Message, stage="دانلود"):
+    """پیشرفت ساده بدون محاسبات سنگین"""
+    try:
+        percent = int(current * 100 / total)
+        text = f"🚀 {stage} فایل... {percent}% ({current//1024//1024}MB/{total//1024//1024}MB)"
         await message.edit_text(text)
-    except: 
+    except:
         pass
 
 async def split_large_file(file_path, max_size=MAX_SPLIT_SIZE):
@@ -123,6 +108,14 @@ async def create_split_zip(files, zip_path, password, processing_msg):
                 file_path = file_info["path"]
                 file_name = file_info["name"]
                 
+                # آپدیت وضعیت
+                if i % 2 == 0 or i == total_files:  # فقط هر چند فایل یکبار آپدیت کنیم
+                    progress_text = f"⏳ در حال فشرده سازی... {i}/{total_files}"
+                    try: 
+                        await processing_msg.edit_text(progress_text)
+                    except: 
+                        pass
+                
                 if os.path.getsize(file_path) > MAX_SPLIT_SIZE:
                     parts = await split_large_file(file_path)
                     for part_path in parts:
@@ -132,12 +125,6 @@ async def create_split_zip(files, zip_path, password, processing_msg):
                 else:
                     zipf.write(file_path, file_name)
                     os.remove(file_path)
-                
-                progress_text = f"⏳ در حال فشرده سازی... {i}/{total_files}"
-                try: 
-                    await processing_msg.edit_text(progress_text)
-                except: 
-                    pass
                 
         return True
     except Exception as e:
@@ -228,58 +215,52 @@ async def process_zip(client, message):
         waiting_for_filename.pop(user_id, None)
         
         try:
-            processing_msg = await message.reply_text("⏳ در حال ایجاد فایل زیپ...")
+            processing_msg = await message.reply_text("⏳ در حال دانلود فایل‌ها...")
             zip_password = zip_password_storage.pop(user_id, None)
             
             with tempfile.TemporaryDirectory() as tmp_dir:
                 files_to_zip = []
                 total_files = len(user_files[user_id])
                 
+                # دانلود سریع بدون progress bar
                 for i, finfo in enumerate(user_files[user_id], 1):
                     file_msg = finfo["message"]
                     file_name = finfo["file_name"]
                     file_path = os.path.join(tmp_dir, file_name)
                     
-                    start_time = time.time()
-                    await client.download_media(
-                        file_msg, 
-                        file_path, 
-                        progress=lambda current, total: progress_bar(
-                            current, total, processing_msg, start_time, "دانلود"
-                        )
-                    )
+                    # دانلود بدون progress برای سرعت بیشتر
+                    await client.download_media(file_msg, file_path)
                     
                     if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
                         files_to_zip.append({"path": file_path, "name": file_name})
                     
-                    progress_text = f"📥 دانلود فایل {i}/{total_files}"
-                    try: 
-                        await processing_msg.edit_text(progress_text)
-                    except: 
-                        pass
+                    # آپدیت وضعیت هر چند فایل یکبار
+                    if i % 2 == 0 or i == total_files:
+                        await processing_msg.edit_text(f"📥 دانلود شده: {i}/{total_files}")
                 
+                # ایجاد زیپ
+                await processing_msg.edit_text("⏳ در حال ایجاد فایل زیپ...")
                 zip_file_name = f"{zip_name}.zip"
                 zip_path = os.path.join(tmp_dir, zip_file_name)
                 
                 success = await create_split_zip(files_to_zip, zip_path, zip_password, processing_msg)
                 
                 if success and os.path.exists(zip_path):
-                    start_time = time.time()
+                    # آپلود سریع بدون progress
+                    await processing_msg.edit_text("⏳ در حال آپلود فایل زیپ...")
                     await client.send_document(
                         message.chat.id,
                         zip_path,
-                        caption=f"✅ فایل زیپ آماده شد!\n🔑 رمز: `{zip_password}`\n📦 تعداد فایل‌ها: {total_files}",
-                        progress=lambda current, total: progress_bar(
-                            current, total, processing_msg, start_time, "آپلود"
-                        )
+                        caption=f"✅ فایل زیپ آماده شد!\n🔑 رمز: `{zip_password}`\n📦 تعداد فایل‌ها: {total_files}"
                     )
                     await processing_msg.delete()
+                    await message.reply_text("✅ عملیات با موفقیت完成 شد!")
                 else:
                     await message.reply_text("❌ خطایی در ایجاد فایل زیپ رخ داد.")
                     
         except Exception as e:
             logger.error(f"Error in zip process: {e}", exc_info=True)
-            await message.reply_text("❌ خطایی رخ داد.")
+            await message.reply_text(f"❌ خطایی رخ داد: {str(e)}")
         finally:
             user_files[user_id] = []
 
