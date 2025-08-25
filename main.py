@@ -4,12 +4,9 @@ import tempfile
 import pyzipper
 import logging
 import sys
-import asyncio
 import math
 from pyrogram import Client, filters
 from pyrogram.types import Message
-from flask import Flask
-import threading
 
 # ===== تنظیمات =====
 API_ID = 1867911
@@ -18,7 +15,7 @@ SESSION_STRING = "BAAcgIcAgh6c-Xa01ljkm3Uhy9aG_I2jG2BeLbe6RZoA9nwrVW5se2DgNMOWKl
 ALLOWED_USER_ID = 417536686
 MAX_FILE_SIZE = 2097152000  # 2GB
 MAX_TOTAL_SIZE = 2097152000  # 2GB
-MAX_SPLIT_SIZE = 1990000000  # 1.99GB - برای حاشیه امنیت
+MAX_SPLIT_SIZE = 1990000000  # 1.99GB - کمی کمتر از 2GB برای حاشیه امنیت
 
 # ===== لاگ =====
 logging.basicConfig(
@@ -28,8 +25,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ===== کلاینت Pyrogram =====
-app = None
+# ===== کلاینت =====
+app = Client(
+    "user_bot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    session_string=SESSION_STRING,
+    in_memory=True
+)
 
 # ===== داده‌ها =====
 user_files = {}
@@ -101,7 +104,7 @@ async def create_split_zip(files, zip_path, password, processing_msg):
         logger.error(f"Error creating split zip: {e}")
         return False
 
-# ===== فانکشن‌های اصلی =====
+# ===== فانکشن‌های موجود =====
 def is_user_allowed(user_id: int) -> bool:
     return user_id == ALLOWED_USER_ID
 
@@ -127,18 +130,20 @@ async def progress_bar(current, total, message: Message, start_time, stage="دا
     except: pass
 
 # ===== هندلرها =====
+@app.on_message(filters.command("start"))
 async def start(client, message):
     if not is_user_allowed(message.from_user.id):
         return await message.reply_text("❌ دسترسی denied.")
     await message.reply_text(
         "سلام 👋\nفایل‌تو بفرست تا برات زیپ کنم.\n"
         "💡 کپشن فایل = pass=رمز برای تعیین پسورد (اختیاری)\n"
-        f"📦 حداکثر حجم هر فایل: نامحدود (فایل‌های بزرگ به صورت خودکار تقسیم می‌شوند)\n"
+        f"📦 حداکثر حجم هر فایل: {MAX_FILE_SIZE//1024//1024}MB\n"
         f"📦 حداکثر حجم کل: {MAX_TOTAL_SIZE//1024//1024}MB\n"
         "🔧 فایل‌های بزرگتر از 2GB به صورت خودکار تقسیم می‌شوند\n"
         "بعد از ارسال فایل‌ها دستور /zip رو بزن تا ابتدا پسورد و سپس اسم فایل نهایی را وارد کنی."
     )
 
+@app.on_message(filters.document)
 async def handle_file(client, message):
     if not is_user_allowed(message.from_user.id):
         return
@@ -154,11 +159,8 @@ async def handle_file(client, message):
     user_id = message.from_user.id
     if user_id not in user_files: user_files[user_id] = []
     user_files[user_id].append({"message": message, "file_name": file_name, "password": password, "file_size": doc.file_size})
-    
-    # پیام تأیید دریافت فایل
-    size_mb = doc.file_size // 1024 // 1024
-    await message.reply_text(f"✅ فایل دریافت شد: {file_name}\n📦 حجم: {size_mb}MB")
 
+@app.on_message(filters.command("zip"))
 async def start_zip(client, message):
     if not is_user_allowed(message.from_user.id): return
     user_id = message.from_user.id
@@ -166,14 +168,10 @@ async def start_zip(client, message):
         return await message.reply_text("❌ هیچ فایلی برای زیپ کردن وجود ندارد.")
     
     total_size = sum(f["file_size"] for f in user_files[user_id])
-    if total_size > MAX_TOTAL_SIZE:
-        await message.reply_text(f"❌ حجم کل فایل‌ها بیش از حد مجاز است! ({MAX_TOTAL_SIZE//1024//1024}MB)")
-        user_files[user_id] = []
-        return
-        
     await message.reply_text("🔐 لطفاً رمز عبور برای فایل زیپ وارد کن:\n❌ برای لغو /cancel را بزنید")
     waiting_for_password[user_id] = True
 
+@app.on_message(filters.command("cancel"))
 async def cancel_zip(client, message):
     user_id = message.from_user.id
     if user_id in user_files: user_files[user_id] = []
@@ -182,10 +180,12 @@ async def cancel_zip(client, message):
     zip_password_storage.pop(user_id,None)
     await message.reply_text("❌ عملیات لغو شد.")
 
+# ===== هندلر برای پسورد و اسم فایل =====
 def non_command_filter(_, __, message: Message):
     return message.text and not message.text.startswith('/')
 non_command = filters.create(non_command_filter)
 
+@app.on_message(filters.text & non_command)
 async def process_zip(client, message):
     user_id = message.from_user.id
     
@@ -260,59 +260,25 @@ async def process_zip(client, message):
         finally:
             user_files[user_id] = []
 
-# ===== تابع برای اجرای ربات =====
-async def run_bot():
-    """تابعی که ربات را اجرا می‌کند"""
-    global app
-    logger.info("Starting user bot...")
-    
-    app = Client(
-        "user_bot",
-        api_id=API_ID,
-        api_hash=API_HASH,
-        session_string=SESSION_STRING,
-        in_memory=True
-    )
-    
-    # اضافه کردن هندلرها
-    app.on_message(filters.command("start"))(start)
-    app.on_message(filters.document)(handle_file)
-    app.on_message(filters.command("zip"))(start_zip)
-    app.on_message(filters.command("cancel"))(cancel_zip)
-    app.on_message(filters.text & non_command)(process_zip)
-    
-    await app.start()
-    logger.info("Bot started successfully!")
-    
-    # منتظر ماندن تا ربات اجرا شود
-    await asyncio.Event().wait()
-
 # ===== اجرا =====
 if __name__ == "__main__":
-    # ایجاد وب سرور Flask
-    web_app = Flask(__name__)
+    logger.info("Starting user bot...")
     
-    @web_app.route('/')
-    def home():
-        return "Bot is running", 200
+    # ایجاد یک endpoint ساده برای سلامت سرویس
+    from flask import Flask
+    import threading
+    
+    web_app = Flask(__name__)
     
     @web_app.route('/health')
     def health_check():
         return "Bot is running", 200
     
-    # اجرای ربات در یک thread جداگانه
-    def start_bot():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(run_bot())
-        except Exception as e:
-            logger.error(f"Bot error: {e}")
+    def run_flask():
+        port = int(os.environ.get("PORT", 10000))
+        web_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
     
-    bot_thread = threading.Thread(target=start_bot, daemon=True)
-    bot_thread.start()
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
     
-    # اجرای Flask در thread اصلی
-    port = int(os.environ.get("PORT", 10000))
-    logger.info(f"Starting Flask web server on port {port}...")
-    web_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+    app.run()
