@@ -13,7 +13,6 @@ import threading
 from collections import deque
 import random
 import math
-import heapq
 from typing import Dict, List, Callable, Any, Tuple
 
 # ===== تنظیمات =====
@@ -39,139 +38,9 @@ app = None
 # ===== داده‌ها =====
 user_files: Dict[int, List] = {}
 user_states: Dict[int, Any] = {}
-
-# ===== سیستم زمان‌بندی تسک‌ها =====
-class TaskScheduler:
-    def __init__(self):
-        self.scheduled_tasks: List[Tuple[float, int, Callable, Tuple, Dict]] = []
-        self.task_counter = 0
-        self.running = True
-        asyncio.create_task(self._scheduler_loop())
-    
-    async def _scheduler_loop(self):
-        """حلقه اصلی زمان‌بندی"""
-        while self.running:
-            now = time.time()
-            
-            while self.scheduled_tasks and self.scheduled_tasks[0][0] <= now:
-                execution_time, task_id, task_func, args, kwargs = heapq.heappop(self.scheduled_tasks)
-                try:
-                    if asyncio.iscoroutinefunction(task_func):
-                        await task_func(*args, **kwargs)
-                    else:
-                        task_func(*args, **kwargs)
-                except Exception as e:
-                    logger.error(f"Scheduled task error: {e}")
-            
-            if self.scheduled_tasks:
-                next_time = self.scheduled_tasks[0][0]
-                sleep_time = max(0, next_time - now)
-                await asyncio.sleep(sleep_time)
-            else:
-                await asyncio.sleep(1)
-    
-    def schedule_task(self, task_func: Callable, delay: float, *args, **kwargs) -> int:
-        """زمان‌بندی یک تسک برای اجرای بعدی"""
-        execution_time = time.time() + delay
-        task_id = self.task_counter
-        self.task_counter += 1
-        
-        heapq.heappush(self.scheduled_tasks, (execution_time, task_id, task_func, args, kwargs))
-        return task_id
-    
-    def cancel_task(self, task_id: int):
-        """لغو یک تسک زمان‌بندی شده"""
-        self.scheduled_tasks = [task for task in self.scheduled_tasks if task[1] != task_id]
-        heapq.heapify(self.scheduled_tasks)
-    
-    def stop(self):
-        """توقف scheduler"""
-        self.running = False
-
-# ===== سیستم مدیریت تسک‌ها =====
-class TaskManager:
-    def __init__(self):
-        self.scheduler = TaskScheduler()
-        self.task_queue = deque()
-        self.processing = False
-    
-    async def add_task(self, task_func: Callable, *args, **kwargs):
-        """اضافه کردن تسک جدید"""
-        self.task_queue.append((task_func, args, kwargs))
-        await self._process_queue()
-    
-    async def _process_queue(self):
-        """پردازش صف تسک‌ها"""
-        if self.processing:
-            return
-        
-        self.processing = True
-        
-        try:
-            while self.task_queue:
-                task_func, args, kwargs = self.task_queue.popleft()
-                
-                try:
-                    if asyncio.iscoroutinefunction(task_func):
-                        await task_func(*args, **kwargs)
-                    else:
-                        task_func(*args, **kwargs)
-                    
-                    await asyncio.sleep(random.uniform(2.0, 5.0))
-                    
-                except FloodWait as e:
-                    wait_time = e.value + 10
-                    logger.warning(f"🕒 FloodWait detected: {wait_time} seconds. Rescheduling task...")
-                    
-                    self.scheduler.schedule_task(
-                        task_func, 
-                        wait_time, 
-                        *args, 
-                        **kwargs
-                    )
-                    
-                    user_id = kwargs.get('user_id')
-                    if user_id:
-                        await self._notify_user_floodwait(user_id, wait_time)
-                    
-                    await asyncio.sleep(5)
-                    
-                except Exception as e:
-                    logger.error(f"Task error: {e}")
-                    await asyncio.sleep(5)
-        
-        finally:
-            self.processing = False
-    
-    async def _notify_user_floodwait(self, user_id: int, wait_time: int):
-        """اطلاع به کاربر درباره FloodWait"""
-        try:
-            wait_minutes = wait_time // 60
-            wait_seconds = wait_time % 60
-            
-            await self.safe_send_message(
-                user_id,
-                f"⏳ به دلیل محدودیت موقت تلگرام، عملیات متوقف شد.\n"
-                f"🕒 زمان انتظار: {wait_minutes} دقیقه و {wait_seconds} ثانیه\n"
-                f"✅ بعد از این زمان، عملیات به طور خودکار ادامه می‌یابد.",
-                priority=True
-            )
-        except:
-            pass
-    
-    async def safe_send_message(self, chat_id, text, reply_to_message_id=None, priority=False):
-        """ارسال پیام با پشتیبانی از زمان‌بندی"""
-        async def _send():
-            await app.send_message(chat_id, text, reply_to_message_id=reply_to_message_id)
-            await asyncio.sleep(1)
-        
-        if priority:
-            try:
-                await _send()
-            except FloodWait as e:
-                self.scheduler.schedule_task(_send, e.value + 5)
-        else:
-            await self.add_task(_send)
+scheduled_tasks: List[Tuple[float, Callable, Tuple, Dict]] = []
+task_queue = deque()
+processing = False
 
 # ===== فانکشن‌های کمکی =====
 def is_user_allowed(user_id: int) -> bool:
@@ -179,23 +48,26 @@ def is_user_allowed(user_id: int) -> bool:
 
 async def safe_send_message(chat_id, text, reply_to_message_id=None, priority=False):
     """ارسال پیام با مدیریت FloodWait"""
-    # ابتدا task_manager رو به صورت global تعریف می‌کنیم
-    global task_manager
-    await task_manager.safe_send_message(chat_id, text, reply_to_message_id, priority)
+    try:
+        await asyncio.sleep(random.uniform(1.0, 3.0))
+        await app.send_message(chat_id, text, reply_to_message_id=reply_to_message_id)
+    except FloodWait as e:
+        logger.warning(f"FloodWait: {e.value} seconds")
+        # زمان‌بندی مجدد
+        schedule_task(lambda: safe_send_message(chat_id, text, reply_to_message_id, priority), e.value + 5)
+    except Exception as e:
+        logger.error(f"Error sending message: {e}")
 
 async def safe_download_media(message, file_path, progress=None, progress_args=None):
     """دانلود با مدیریت FloodWait"""
-    async def _download():
+    try:
         await asyncio.sleep(random.uniform(2.0, 5.0))
         await app.download_media(message, file_path, progress=progress, progress_args=progress_args)
         return True
-    
-    try:
-        return await _download()
     except FloodWait as e:
-        # استفاده از task_manager global
-        global task_manager
-        task_manager.scheduler.schedule_task(_download, e.value + 10)
+        logger.warning(f"Download FloodWait: {e.value} seconds")
+        # زمان‌بندی مجدد
+        schedule_task(lambda: safe_download_media(message, file_path, progress, progress_args), e.value + 10)
         return False
     except Exception as e:
         logger.error(f"Download error: {e}")
@@ -226,6 +98,94 @@ async def progress_bar(current, total, message: Message, start_time, stage="دا
         
     except Exception as e:
         logger.error(f"Progress error: {e}")
+
+def schedule_task(task_func: Callable, delay: float, *args, **kwargs):
+    """زمان‌بندی یک تسک برای اجرای بعدی"""
+    execution_time = time.time() + delay
+    scheduled_tasks.append((execution_time, task_func, args, kwargs))
+
+async def process_scheduled_tasks():
+    """پردازش تسک‌های زمان‌بندی شده"""
+    while True:
+        now = time.time()
+        
+        # اجرای تسک‌های رسیده
+        for i, (execution_time, task_func, args, kwargs) in enumerate(scheduled_tasks[:]):
+            if execution_time <= now:
+                try:
+                    if asyncio.iscoroutinefunction(task_func):
+                        await task_func(*args, **kwargs)
+                    else:
+                        task_func(*args, **kwargs)
+                    scheduled_tasks.pop(i)
+                except Exception as e:
+                    logger.error(f"Scheduled task error: {e}")
+                    scheduled_tasks.pop(i)
+        
+        await asyncio.sleep(1)
+
+async def process_task_queue():
+    """پردازش صف تسک‌ها"""
+    global processing
+    
+    while True:
+        if processing or not task_queue:
+            await asyncio.sleep(1)
+            continue
+        
+        processing = True
+        
+        try:
+            task_func, args, kwargs = task_queue.popleft()
+            
+            try:
+                if asyncio.iscoroutinefunction(task_func):
+                    await task_func(*args, **kwargs)
+                else:
+                    task_func(*args, **kwargs)
+                
+                await asyncio.sleep(random.uniform(2.0, 5.0))
+                
+            except FloodWait as e:
+                wait_time = e.value + 10
+                logger.warning(f"🕒 FloodWait detected: {wait_time} seconds. Rescheduling task...")
+                
+                # زمان‌بندی مجدد
+                schedule_task(task_func, wait_time, *args, **kwargs)
+                
+                # اطلاع به کاربر
+                user_id = kwargs.get('user_id')
+                if user_id:
+                    await notify_user_floodwait(user_id, wait_time)
+                
+                await asyncio.sleep(5)
+                
+            except Exception as e:
+                logger.error(f"Task error: {e}")
+                await asyncio.sleep(5)
+        
+        finally:
+            processing = False
+            await asyncio.sleep(0.1)
+
+async def notify_user_floodwait(user_id: int, wait_time: int):
+    """اطلاع به کاربر درباره FloodWait"""
+    try:
+        wait_minutes = wait_time // 60
+        wait_seconds = wait_time % 60
+        
+        await safe_send_message(
+            user_id,
+            f"⏳ به دلیل محدودیت موقت تلگرام، عملیات متوقف شد.\n"
+            f"🕒 زمان انتظار: {wait_minutes} دقیقه و {wait_seconds} ثانیه\n"
+            f"✅ بعد از این زمان، عملیات به طور خودکار ادامه می‌یابد."
+        )
+    except:
+        pass
+
+def add_to_queue(task_func: Callable, *args, **kwargs):
+    """اضافه کردن تسک به صف"""
+    task_queue.append((task_func, args, kwargs))
 
 # ===== هندلرها =====
 async def start(client, message):
@@ -261,8 +221,7 @@ async def handle_file(client, message):
         await safe_send_message(
             message.chat.id,
             f"❌ حجم فایل بیش از حد مجاز است! ({MAX_FILE_SIZE//1024//1024}MB)",
-            reply_to_message_id=message.id,
-            priority=True
+            reply_to_message_id=message.id
         )
         return
     
@@ -292,8 +251,7 @@ async def start_zip(client, message):
         await safe_send_message(
             message.chat.id,
             "❌ هیچ فایلی برای زیپ کردن وجود ندارد.",
-            reply_to_message_id=message.id,
-            priority=True
+            reply_to_message_id=message.id
         )
         return
     
@@ -302,8 +260,7 @@ async def start_zip(client, message):
         await safe_send_message(
             message.chat.id,
             f"❌ حجم کل فایل‌ها بیش از حد مجاز است! ({MAX_TOTAL_SIZE//1024//1024}MB)",
-            reply_to_message_id=message.id,
-            priority=True
+            reply_to_message_id=message.id
         )
         user_files[user_id] = []
         return
@@ -313,8 +270,7 @@ async def start_zip(client, message):
     await safe_send_message(
         message.chat.id,
         "🔐 لطفاً رمز عبور برای فایل زیپ وارد کن:\n❌ برای لغو /cancel را بزنید",
-        reply_to_message_id=message.id,
-        priority=True
+        reply_to_message_id=message.id
     )
 
 async def cancel_zip(client, message):
@@ -327,8 +283,7 @@ async def cancel_zip(client, message):
     await safe_send_message(
         message.chat.id,
         "❌ عملیات لغو شد.",
-        reply_to_message_id=message.id,
-        priority=True
+        reply_to_message_id=message.id
     )
 
 async def process_zip(client, message):
@@ -345,8 +300,7 @@ async def process_zip(client, message):
             await safe_send_message(
                 message.chat.id,
                 "❌ رمز عبور نمی‌تواند خالی باشد.",
-                reply_to_message_id=message.id,
-                priority=True
+                reply_to_message_id=message.id
             )
             return
         
@@ -356,8 +310,7 @@ async def process_zip(client, message):
         await safe_send_message(
             message.chat.id,
             "📝 حالا اسم فایل زیپ نهایی را وارد کن (بدون .zip)",
-            reply_to_message_id=message.id,
-            priority=True
+            reply_to_message_id=message.id
         )
         return
     
@@ -367,12 +320,11 @@ async def process_zip(client, message):
             await safe_send_message(
                 message.chat.id,
                 "❌ اسم فایل نمی‌تواند خالی باشد.",
-                reply_to_message_id=message.id,
-                priority=True
+                reply_to_message_id=message.id
             )
             return
         
-        await process_zip_files(user_id, zip_name, message.chat.id, message.id)
+        add_to_queue(process_zip_files, user_id, zip_name, message.chat.id, message.id)
 
 async def process_zip_files(user_id, zip_name, chat_id, message_id):
     """پردازش هوشمندانه فایل‌ها با زیپ و آپلود تدریجی"""
@@ -460,26 +412,20 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
             await safe_send_message(
                 chat_id,
                 f"✅ تمامی {num_parts} پارت زیپ آماده شد!\n🔑 رمز: `{zip_password}`",
-                reply_to_message_id=message_id,
-                priority=True
+                reply_to_message_id=message_id
             )
             
     except FloodWait as e:
         logger.warning(f"⏰ Rescheduling zip task after {e.value} seconds")
         
-        # استفاده از task_manager global
-        global task_manager
-        task_manager.scheduler.schedule_task(
-            lambda: process_zip_files(user_id, zip_name, chat_id, message_id),
-            e.value + 15
-        )
+        # زمان‌بندی مجدد
+        schedule_task(process_zip_files, e.value + 15, user_id, zip_name, chat_id, message_id)
         
         await safe_send_message(
             chat_id,
             f"⏳ عملیات زیپ به دلیل محدودیت موقت متوقف شد.\n"
             f"🕒 ادامه کار بعد از {e.value} ثانیه...",
-            reply_to_message_id=message_id,
-            priority=True
+            reply_to_message_id=message_id
         )
         
     except Exception as e:
@@ -487,8 +433,7 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
         await safe_send_message(
             chat_id,
             "❌ خطایی در ایجاد فایل زیپ رخ داد.",
-            reply_to_message_id=message_id,
-            priority=True
+            reply_to_message_id=message_id
         )
     finally:
         if user_id in user_files:
@@ -523,12 +468,8 @@ async def upload_zip_part(zip_path, part_number, total_parts, chat_id, message_i
         await asyncio.sleep(random.uniform(5.0, 10.0))
         
     except FloodWait as e:
-        # استفاده از task_manager global
-        global task_manager
-        task_manager.scheduler.schedule_task(
-            lambda: upload_zip_part(zip_path, part_number, total_parts, chat_id, message_id, password, processing_msg),
-            e.value + 10
-        )
+        # زمان‌بندی مجدد
+        schedule_task(upload_zip_part, e.value + 10, zip_path, part_number, total_parts, chat_id, message_id, password, processing_msg)
         raise
     except Exception as e:
         logger.error(f"Error uploading part {part_number}: {e}")
@@ -544,9 +485,6 @@ def non_command_filter(_, __, message: Message):
 
 non_command = filters.create(non_command_filter)
 
-# ===== ایجاد task_manager به صورت global =====
-task_manager = TaskManager()
-
 # ===== تابع برای اجرای ربات =====
 async def run_bot():
     global app
@@ -559,6 +497,10 @@ async def run_bot():
         session_string=SESSION_STRING,
         in_memory=True
     )
+    
+    # راه‌اندازی پردازش‌کننده‌های پس‌زمینه
+    asyncio.create_task(process_scheduled_tasks())
+    asyncio.create_task(process_task_queue())
     
     # اضافه کردن هندلرها
     app.on_message(filters.command("start"))(start)
