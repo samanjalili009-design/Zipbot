@@ -21,6 +21,7 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
     
     # اجرای ربات
+    print("ربات در حال اجرا است...")
     application.run_polling()
 
 if __name__ == "__main__":
