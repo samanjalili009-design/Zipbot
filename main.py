@@ -4,8 +4,11 @@ import tempfile
 import pyzipper
 import logging
 import sys
+import asyncio
+import threading
 from pyrogram import Client, filters
 from pyrogram.types import Message
+from flask import Flask
 
 # ===== تنظیمات =====
 API_ID = 2487823
@@ -23,7 +26,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ===== کلاینت =====
+# ===== ایجاد برنامه Flask برای Render =====
+web_app = Flask(__name__)
+
+@web_app.route('/')
+def health_check():
+    return "OK", 200
+
+@web_app.route('/health')
+def health():
+    return "Bot is running", 200
+
+# ===== کلاینت Pyrogram =====
 app = Client(
     "user_bot",
     api_id=API_ID,
@@ -173,28 +187,32 @@ async def process_zip(client, message):
         finally:
             user_files[user_id] = []
 
+# ===== تابع برای اجرای ربات =====
+async def run_bot():
+    """تابعی که ربات را اجرا می‌کند"""
+    logger.info("Starting user bot...")
+    await app.start()
+    logger.info("Bot started successfully!")
+    # منتظر می‌مانیم تا ربات به کار خود ادامه دهد
+    await asyncio.Event().wait()
+
 # ===== اجرا =====
 if __name__ == "__main__":
-    logger.info("Starting user bot...")
+    # ایجاد و مدیریت event loop برای Pyrogram
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     
-    # ایجاد یک endpoint ساده برای سلامت سرویس
-    from flask import Flask
-    import threading
+    # اجرای ربات در یک thread جداگانه
+    def start_bot():
+        try:
+            loop.run_until_complete(run_bot())
+        except Exception as e:
+            logger.error(f"Bot error: {e}")
     
-    # ایجاد وب سرور ساده Flask
-    web_app = Flask(__name__)
+    bot_thread = threading.Thread(target=start_bot, daemon=True)
+    bot_thread.start()
     
-    @web_app.route('/health')
-    def health_check():
-        return "Bot is running", 200
-    
-    # اجرای Flask در یک thread جداگانه
-    def run_flask():
-        port = int(os.environ.get("PORT", 10000))
-        web_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
-    
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    
-    # اجرای ربات اصلی
-    app.run()
+    # اجرای وب سرور Flask در thread اصلی
+    port = int(os.environ.get("PORT", 10000))
+    logger.info(f"Starting Flask web server on port {port}...")
+    web_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
