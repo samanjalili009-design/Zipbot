@@ -63,10 +63,13 @@ async def zip_handler(event):
         )
         
         # پاک کردن فایل‌های موقت
-        os.remove(file_path)
-        os.remove(zip_path)
+        try:
+            os.remove(file_path)
+            os.remove(zip_path)
+        except:
+            pass
         
-        await event.reply('✅ عملیات با موفقیت完成 شد!')
+        await event.reply('✅ عملیات با موفقیت انجام شد!')
         
     except Exception as e:
         await event.reply(f'❌ خطا: {str(e)}')
