@@ -144,6 +144,12 @@ async def create_split_zip(files, zip_path, password, processing_msg):
         logger.error(f"Error creating split zip: {e}")
         return False
 
+# ===== فیلتر برای تشخیص پیام‌های غیر دستوری =====
+def non_command_filter(_, __, message):
+    return message.text and not message.text.startswith('/')
+
+non_command = filters.create(non_command_filter)
+
 # ===== هندلرها =====
 @app.on_message(filters.command("start"))
 async def start(client, message):
@@ -202,7 +208,7 @@ async def cancel_zip(client, message):
     zip_password_storage.pop(user_id, None)
     await message.reply_text("❌ عملیات لغو شد.")
 
-@app.on_message(filters.text & ~filters.command)
+@app.on_message(filters.text & non_command)
 async def process_zip(client, message):
     user_id = message.from_user.id
     
