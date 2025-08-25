@@ -12,6 +12,9 @@ from flask import Flask
 import threading
 from collections import deque
 import random
+import math
+import heapq
+from typing import Dict, List, Callable, Any, Tuple
 
 # ===== تنظیمات =====
 API_ID = 26180086
@@ -20,6 +23,7 @@ SESSION_STRING = "BAGPefYAEAaXaj52wzDLPF0RSfWtF_Slk8nFWzYAHS9vu-HBxRUz9yLnq7m8z-
 ALLOWED_USER_ID = 417536686
 MAX_FILE_SIZE = 2097152000  # 2GB
 MAX_TOTAL_SIZE = 2097152000  # 2GB
+PART_SIZE = 500 * 1024 * 1024  # 500MB per part
 
 # ===== لاگ =====
 logging.basicConfig(
@@ -32,45 +36,168 @@ logger = logging.getLogger(__name__)
 # ===== کلاینت Pyrogram =====
 app = None
 
-# ===== داده‌ها و صف =====
-user_files = {}
-user_states = {}
-request_queue = deque()
-is_processing = False
-processing_lock = asyncio.Lock()
+# ===== داده‌ها =====
+user_files: Dict[int, List] = {}
+user_states: Dict[int, Any] = {}
+
+# ===== سیستم زمان‌بندی تسک‌ها =====
+class TaskScheduler:
+    def __init__(self):
+        self.scheduled_tasks: List[Tuple[float, int, Callable, Tuple, Dict]] = []
+        self.task_counter = 0
+        self.running = True
+        asyncio.create_task(self._scheduler_loop())
+    
+    async def _scheduler_loop(self):
+        """حلقه اصلی زمان‌بندی"""
+        while self.running:
+            now = time.time()
+            
+            while self.scheduled_tasks and self.scheduled_tasks[0][0] <= now:
+                execution_time, task_id, task_func, args, kwargs = heapq.heappop(self.scheduled_tasks)
+                try:
+                    if asyncio.iscoroutinefunction(task_func):
+                        await task_func(*args, **kwargs)
+                    else:
+                        task_func(*args, **kwargs)
+                except Exception as e:
+                    logger.error(f"Scheduled task error: {e}")
+            
+            if self.scheduled_tasks:
+                next_time = self.scheduled_tasks[0][0]
+                sleep_time = max(0, next_time - now)
+                await asyncio.sleep(sleep_time)
+            else:
+                await asyncio.sleep(1)
+    
+    def schedule_task(self, task_func: Callable, delay: float, *args, **kwargs) -> int:
+        """زمان‌بندی یک تسک برای اجرای بعدی"""
+        execution_time = time.time() + delay
+        task_id = self.task_counter
+        self.task_counter += 1
+        
+        heapq.heappush(self.scheduled_tasks, (execution_time, task_id, task_func, args, kwargs))
+        return task_id
+    
+    def cancel_task(self, task_id: int):
+        """لغو یک تسک زمان‌بندی شده"""
+        self.scheduled_tasks = [task for task in self.scheduled_tasks if task[1] != task_id]
+        heapq.heapify(self.scheduled_tasks)
+    
+    def stop(self):
+        """توقف scheduler"""
+        self.running = False
+
+# ===== سیستم مدیریت تسک‌ها =====
+class TaskManager:
+    def __init__(self):
+        self.scheduler = TaskScheduler()
+        self.task_queue = deque()
+        self.processing = False
+    
+    async def add_task(self, task_func: Callable, *args, **kwargs):
+        """اضافه کردن تسک جدید"""
+        self.task_queue.append((task_func, args, kwargs))
+        await self._process_queue()
+    
+    async def _process_queue(self):
+        """پردازش صف تسک‌ها"""
+        if self.processing:
+            return
+        
+        self.processing = True
+        
+        try:
+            while self.task_queue:
+                task_func, args, kwargs = self.task_queue.popleft()
+                
+                try:
+                    if asyncio.iscoroutinefunction(task_func):
+                        await task_func(*args, **kwargs)
+                    else:
+                        task_func(*args, **kwargs)
+                    
+                    await asyncio.sleep(random.uniform(2.0, 5.0))
+                    
+                except FloodWait as e:
+                    wait_time = e.value + 10
+                    logger.warning(f"🕒 FloodWait detected: {wait_time} seconds. Rescheduling task...")
+                    
+                    self.scheduler.schedule_task(
+                        task_func, 
+                        wait_time, 
+                        *args, 
+                        **kwargs
+                    )
+                    
+                    user_id = kwargs.get('user_id')
+                    if user_id:
+                        await self._notify_user_floodwait(user_id, wait_time)
+                    
+                    await asyncio.sleep(5)
+                    
+                except Exception as e:
+                    logger.error(f"Task error: {e}")
+                    await asyncio.sleep(5)
+        
+        finally:
+            self.processing = False
+    
+    async def _notify_user_floodwait(self, user_id: int, wait_time: int):
+        """اطلاع به کاربر درباره FloodWait"""
+        try:
+            wait_minutes = wait_time // 60
+            wait_seconds = wait_time % 60
+            
+            await self.safe_send_message(
+                user_id,
+                f"⏳ به دلیل محدودیت موقت تلگرام، عملیات متوقف شد.\n"
+                f"🕒 زمان انتظار: {wait_minutes} دقیقه و {wait_seconds} ثانیه\n"
+                f"✅ بعد از این زمان، عملیات به طور خودکار ادامه می‌یابد.",
+                priority=True
+            )
+        except:
+            pass
+    
+    async def safe_send_message(self, chat_id, text, reply_to_message_id=None, priority=False):
+        """ارسال پیام با پشتیبانی از زمان‌بندی"""
+        async def _send():
+            await app.send_message(chat_id, text, reply_to_message_id=reply_to_message_id)
+            await asyncio.sleep(1)
+        
+        if priority:
+            try:
+                await _send()
+            except FloodWait as e:
+                self.scheduler.schedule_task(_send, e.value + 5)
+        else:
+            await self.add_task(_send)
+
+# ===== نمونه global =====
+task_manager = TaskManager()
 
 # ===== فانکشن‌های کمکی =====
 def is_user_allowed(user_id: int) -> bool:
     return user_id == ALLOWED_USER_ID
 
-async def safe_send_message(chat_id, text, reply_to_message_id=None):
+async def safe_send_message(chat_id, text, reply_to_message_id=None, priority=False):
     """ارسال پیام با مدیریت FloodWait"""
-    try:
-        await asyncio.sleep(random.uniform(1.0, 3.0))  # تاخیر تصادفی
-        await app.send_message(chat_id, text, reply_to_message_id=reply_to_message_id)
-        return True
-    except FloodWait as e:
-        logger.warning(f"FloodWait: {e.value} seconds")
-        await asyncio.sleep(e.value + 5)
-        await app.send_message(chat_id, text, reply_to_message_id=reply_to_message_id)
-        return True
-    except Exception as e:
-        logger.error(f"Error sending message: {e}")
-        return False
+    await task_manager.safe_send_message(chat_id, text, reply_to_message_id, priority)
 
 async def safe_download_media(message, file_path, progress=None, progress_args=None):
     """دانلود با مدیریت FloodWait"""
+    async def _download():
+        await asyncio.sleep(random.uniform(2.0, 5.0))
+        await app.download_media(message, file_path, progress=progress, progress_args=progress_args)
+        return True
+    
     try:
-        await asyncio.sleep(random.uniform(2.0, 5.0))  # تاخیر قبل از دانلود
-        await app.download_media(message, file_path, progress=progress, progress_args=progress_args)
-        return True
+        return await _download()
     except FloodWait as e:
-        logger.warning(f"Download FloodWait: {e.value} seconds")
-        await asyncio.sleep(e.value + 10)
-        await app.download_media(message, file_path, progress=progress, progress_args=progress_args)
-        return True
+        task_manager.scheduler.schedule_task(_download, e.value + 10)
+        return False
     except Exception as e:
-        logger.error(f"Error downloading: {e}")
+        logger.error(f"Download error: {e}")
         return False
 
 async def progress_bar(current, total, message: Message, start_time, stage="دانلود"):
@@ -83,7 +210,6 @@ async def progress_bar(current, total, message: Message, start_time, stage="دا
         
         percent = int(current * 100 / total)
         
-        # فقط هر 5% آپدیت شود تا پیام کمتری ارسال شود
         if percent % 5 != 0 and current != total:
             return
             
@@ -92,65 +218,20 @@ async def progress_bar(current, total, message: Message, start_time, stage="دا
         bar_filled = int(percent / 5)
         bar = "▓" * bar_filled + "░" * (20 - bar_filled)
         
-        text = f"""
-🚀 {stage} فایل...
-
-{bar} {percent}%
-
-📦 {current//1024//1024}MB / {total//1024//1024}MB
-⚡️ سرعت: {round(speed/1024,2)} KB/s
-⏳ زمان باقی‌مانده: {eta}s
-        """
+        text = f"🚀 {stage} فایل...\n{bar} {percent}%\n📦 {current//1024//1024}MB / {total//1024//1024}MB"
         
         await message.edit_text(text)
-        await asyncio.sleep(1)  # تاخیر بعد از آپدیت progress
+        await asyncio.sleep(1)
         
     except Exception as e:
         logger.error(f"Progress error: {e}")
-
-async def process_queue():
-    """پردازش هوشمندانه صف درخواست‌ها"""
-    global is_processing
-    
-    async with processing_lock:
-        if is_processing:
-            return
-        is_processing = True
-    
-    try:
-        while request_queue:
-            task_func, args, kwargs = request_queue.popleft()
-            
-            try:
-                await task_func(*args, **kwargs)
-                # تاخیر بین پردازش درخواست‌ها
-                await asyncio.sleep(random.uniform(3.0, 7.0))
-                
-            except FloodWait as e:
-                # بازگرداندن تسک به صف
-                request_queue.appendleft((task_func, args, kwargs))
-                logger.warning(f"Queue FloodWait: sleeping {e.value + 10} seconds")
-                await asyncio.sleep(e.value + 10)
-                
-            except Exception as e:
-                logger.error(f"Queue task error: {e}")
-                await asyncio.sleep(5)
-    
-    finally:
-        is_processing = False
-
-def add_to_queue(task_func, *args, **kwargs):
-    """اضافه کردن تسک به صف"""
-    request_queue.append((task_func, args, kwargs))
-    asyncio.create_task(process_queue())
 
 # ===== هندلرها =====
 async def start(client, message):
     if not is_user_allowed(message.from_user.id):
         return
     
-    add_to_queue(
-        safe_send_message,
+    await safe_send_message(
         message.chat.id,
         "سلام 👋\nفایل‌تو بفرست تا برات زیپ کنم.\n"
         "💡 کپشن فایل = pass=رمز برای تعیین پسورد (اختیاری)\n"
@@ -176,11 +257,11 @@ async def handle_file(client, message):
         password = caption.split("pass=",1)[1].split()[0].strip()
     
     if doc.file_size > MAX_FILE_SIZE:
-        add_to_queue(
-            safe_send_message,
+        await safe_send_message(
             message.chat.id,
             f"❌ حجم فایل بیش از حد مجاز است! ({MAX_FILE_SIZE//1024//1024}MB)",
-            reply_to_message_id=message.id
+            reply_to_message_id=message.id,
+            priority=True
         )
         return
     
@@ -195,8 +276,7 @@ async def handle_file(client, message):
         "file_size": doc.file_size
     })
     
-    add_to_queue(
-        safe_send_message,
+    await safe_send_message(
         message.chat.id,
         f"✅ فایل '{file_name}' ذخیره شد. برای شروع زیپ /zip را بزنید.",
         reply_to_message_id=message.id
@@ -208,32 +288,32 @@ async def start_zip(client, message):
     
     user_id = message.from_user.id
     if user_id not in user_files or not user_files[user_id]:
-        add_to_queue(
-            safe_send_message,
+        await safe_send_message(
             message.chat.id,
             "❌ هیچ فایلی برای زیپ کردن وجود ندارد.",
-            reply_to_message_id=message.id
+            reply_to_message_id=message.id,
+            priority=True
         )
         return
     
     total_size = sum(f["file_size"] for f in user_files[user_id])
     if total_size > MAX_TOTAL_SIZE:
-        add_to_queue(
-            safe_send_message,
+        await safe_send_message(
             message.chat.id,
             f"❌ حجم کل فایل‌ها بیش از حد مجاز است! ({MAX_TOTAL_SIZE//1024//1024}MB)",
-            reply_to_message_id=message.id
+            reply_to_message_id=message.id,
+            priority=True
         )
         user_files[user_id] = []
         return
     
     user_states[user_id] = "waiting_password"
     
-    add_to_queue(
-        safe_send_message,
+    await safe_send_message(
         message.chat.id,
         "🔐 لطفاً رمز عبور برای فایل زیپ وارد کن:\n❌ برای لغو /cancel را بزنید",
-        reply_to_message_id=message.id
+        reply_to_message_id=message.id,
+        priority=True
     )
 
 async def cancel_zip(client, message):
@@ -243,11 +323,11 @@ async def cancel_zip(client, message):
     
     user_states.pop(user_id, None)
     
-    add_to_queue(
-        safe_send_message,
+    await safe_send_message(
         message.chat.id,
         "❌ عملیات لغو شد.",
-        reply_to_message_id=message.id
+        reply_to_message_id=message.id,
+        priority=True
     )
 
 async def process_zip(client, message):
@@ -256,105 +336,198 @@ async def process_zip(client, message):
     if user_id not in user_states:
         return
     
-    await asyncio.sleep(1)  # تاخیر اولیه
+    await asyncio.sleep(1)
     
-    # مرحله پسورد
     if user_states.get(user_id) == "waiting_password":
         zip_password = message.text.strip()
         if not zip_password:
-            add_to_queue(
-                safe_send_message,
+            await safe_send_message(
                 message.chat.id,
                 "❌ رمز عبور نمی‌تواند خالی باشد.",
-                reply_to_message_id=message.id
+                reply_to_message_id=message.id,
+                priority=True
             )
             return
         
         user_states[user_id] = "waiting_filename"
         user_states[f"{user_id}_password"] = zip_password
         
-        add_to_queue(
-            safe_send_message,
+        await safe_send_message(
             message.chat.id,
             "📝 حالا اسم فایل زیپ نهایی را وارد کن (بدون .zip)",
-            reply_to_message_id=message.id
+            reply_to_message_id=message.id,
+            priority=True
         )
         return
     
-    # مرحله اسم فایل
     if user_states.get(user_id) == "waiting_filename":
         zip_name = message.text.strip()
         if not zip_name:
-            add_to_queue(
-                safe_send_message,
+            await safe_send_message(
                 message.chat.id,
                 "❌ اسم فایل نمی‌تواند خالی باشد.",
-                reply_to_message_id=message.id
+                reply_to_message_id=message.id,
+                priority=True
             )
             return
         
-        # شروع پردازش زیپ
         await process_zip_files(user_id, zip_name, message.chat.id, message.id)
 
 async def process_zip_files(user_id, zip_name, chat_id, message_id):
-    """پردازش اصلی فایل‌های زیپ"""
+    """پردازش هوشمندانه فایل‌ها با زیپ و آپلود تدریجی"""
     try:
         processing_msg = await app.send_message(chat_id, "⏳ در حال ایجاد فایل زیپ...")
         zip_password = user_states.get(f"{user_id}_password")
         
         with tempfile.TemporaryDirectory() as tmp_dir:
-            zip_file_name = f"{zip_name}.zip"
-            zip_path = os.path.join(tmp_dir, zip_file_name)
+            total_files = len(user_files[user_id])
+            all_files = []
             
-            with pyzipper.AESZipFile(zip_path, "w", compression=pyzipper.ZIP_DEFLATED, encryption=pyzipper.WZ_AES) as zipf:
-                if zip_password:
-                    zipf.setpassword(zip_password.encode())
+            # دانلود همه فایل‌ها
+            for i, finfo in enumerate(user_files[user_id], 1):
+                file_msg = finfo["message"]
+                file_name = finfo["file_name"]
+                file_path = os.path.join(tmp_dir, file_name)
                 
-                total_files = len(user_files[user_id])
-                for i, finfo in enumerate(user_files[user_id], 1):
-                    file_msg = finfo["message"]
-                    file_name = finfo["file_name"]
-                    file_path = os.path.join(tmp_dir, file_name)
-                    
-                    start_time = time.time()
-                    await safe_download_media(
-                        file_msg,
-                        file_path,
-                        progress=progress_bar,
-                        progress_args=(processing_msg, start_time, "دانلود")
-                    )
-                    
-                    if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
-                        zipf.write(file_path, file_name)
-                    
-                    os.remove(file_path)
-                    await asyncio.sleep(2)  # تاخیر بین فایل‌ها
+                start_time = time.time()
+                await safe_download_media(
+                    file_msg,
+                    file_path,
+                    progress=progress_bar,
+                    progress_args=(processing_msg, start_time, f"دانلود {i}/{total_files}")
+                )
+                
+                if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+                    all_files.append((file_path, file_name))
+                
+                await asyncio.sleep(2)
             
-            # آپلود فایل زیپ
-            start_time = time.time()
-            await app.send_document(
+            # ایجاد و آپلود پارت‌ها
+            total_size = sum(os.path.getsize(f[0]) for f in all_files)
+            num_parts = math.ceil(total_size / PART_SIZE)
+            
+            await processing_msg.edit_text(f"📦 در حال ایجاد {num_parts} پارت زیپ...")
+            
+            current_part = 1
+            current_size = 0
+            part_files = []
+            current_zip_path = None
+            
+            for file_path, file_name in all_files:
+                file_size = os.path.getsize(file_path)
+                
+                if current_size + file_size > PART_SIZE or current_zip_path is None:
+                    if current_zip_path:
+                        await upload_zip_part(
+                            current_zip_path, 
+                            current_part - 1, 
+                            num_parts, 
+                            chat_id, 
+                            message_id, 
+                            zip_password,
+                            processing_msg
+                        )
+                    
+                    current_zip_path = os.path.join(tmp_dir, f"{zip_name}_part{current_part}.zip")
+                    part_files = []
+                    current_size = 0
+                    current_part += 1
+                
+                part_files.append((file_path, file_name))
+                current_size += file_size
+                
+                with pyzipper.AESZipFile(current_zip_path, "w", 
+                                       compression=pyzipper.ZIP_DEFLATED, 
+                                       encryption=pyzipper.WZ_AES) as zipf:
+                    if zip_password:
+                        zipf.setpassword(zip_password.encode())
+                    
+                    for part_file_path, part_file_name in part_files:
+                        zipf.write(part_file_path, part_file_name)
+            
+            if current_zip_path and os.path.exists(current_zip_path):
+                await upload_zip_part(
+                    current_zip_path, 
+                    current_part - 1, 
+                    num_parts, 
+                    chat_id, 
+                    message_id, 
+                    zip_password,
+                    processing_msg
+                )
+            
+            await safe_send_message(
                 chat_id,
-                zip_path,
-                caption=f"✅ فایل زیپ آماده شد!\n🔑 رمز: `{zip_password}`\n📦 تعداد فایل‌ها: {total_files}",
-                progress=progress_bar,
-                progress_args=(processing_msg, start_time, "آپلود"),
-                reply_to_message_id=message_id
+                f"✅ تمامی {num_parts} پارت زیپ آماده شد!\n🔑 رمز: `{zip_password}`",
+                reply_to_message_id=message_id,
+                priority=True
             )
             
+    except FloodWait as e:
+        logger.warning(f"⏰ Rescheduling zip task after {e.value} seconds")
+        
+        task_manager.scheduler.schedule_task(
+            lambda: process_zip_files(user_id, zip_name, chat_id, message_id),
+            e.value + 15
+        )
+        
+        await safe_send_message(
+            chat_id,
+            f"⏳ عملیات زیپ به دلیل محدودیت موقت متوقف شد.\n"
+            f"🕒 ادامه کار بعد از {e.value} ثانیه...",
+            reply_to_message_id=message_id,
+            priority=True
+        )
+        
     except Exception as e:
         logger.error(f"Error in zip processing: {e}", exc_info=True)
-        add_to_queue(
-            safe_send_message,
+        await safe_send_message(
             chat_id,
             "❌ خطایی در ایجاد فایل زیپ رخ داد.",
-            reply_to_message_id=message_id
+            reply_to_message_id=message_id,
+            priority=True
         )
     finally:
-        # پاکسازی
         if user_id in user_files:
             user_files[user_id] = []
         user_states.pop(user_id, None)
         user_states.pop(f"{user_id}_password", None)
+
+async def upload_zip_part(zip_path, part_number, total_parts, chat_id, message_id, password, processing_msg):
+    """آپلود یک پارت زیپ"""
+    try:
+        part_size = os.path.getsize(zip_path)
+        
+        await processing_msg.edit_text(
+            f"📤 در حال آپلود پارت {part_number + 1}/{total_parts}\n"
+            f"📦 حجم: {part_size // 1024 // 1024}MB"
+        )
+        
+        start_time = time.time()
+        await app.send_document(
+            chat_id,
+            zip_path,
+            caption=(
+                f"📦 پارت {part_number + 1}/{total_parts}\n"
+                f"🔑 رمز: `{password}`\n"
+                f"💾 حجم: {part_size // 1024 // 1024}MB"
+            ),
+            progress=progress_bar,
+            progress_args=(processing_msg, start_time, f"آپلود پارت {part_number + 1}"),
+            reply_to_message_id=message_id
+        )
+        
+        await asyncio.sleep(random.uniform(5.0, 10.0))
+        
+    except FloodWait as e:
+        task_manager.scheduler.schedule_task(
+            lambda: upload_zip_part(zip_path, part_number, total_parts, chat_id, message_id, password, processing_msg),
+            e.value + 10
+        )
+        raise
+    except Exception as e:
+        logger.error(f"Error uploading part {part_number}: {e}")
+        raise
 
 # ===== فیلتر پیام‌های غیردستوری =====
 def non_command_filter(_, __, message: Message):
@@ -369,7 +542,7 @@ non_command = filters.create(non_command_filter)
 # ===== تابع برای اجرای ربات =====
 async def run_bot():
     global app
-    logger.info("Starting user bot with flood protection...")
+    logger.info("Starting user bot with intelligent task scheduling...")
     
     app = Client(
         "user_bot",
@@ -387,25 +560,22 @@ async def run_bot():
     app.on_message(filters.text & non_command)(process_zip)
     
     await app.start()
-    logger.info("Bot started successfully with flood protection!")
+    logger.info("Bot started successfully with intelligent scheduling!")
     
-    # منتظر ماندن تا ربات اجرا شود
     await asyncio.Event().wait()
 
 # ===== اجرا =====
 if __name__ == "__main__":
-    # ایجاد وب سرور Flask
     web_app = Flask(__name__)
     
     @web_app.route('/')
     def home():
-        return "Bot is running with flood protection", 200
+        return "Bot is running with intelligent scheduling", 200
     
     @web_app.route('/health')
     def health_check():
         return "Bot is running", 200
     
-    # اجرای ربات در یک thread جداگانه
     def start_bot():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -417,7 +587,6 @@ if __name__ == "__main__":
     bot_thread = threading.Thread(target=start_bot, daemon=True)
     bot_thread.start()
     
-    # اجرای Flask در thread اصلی
     port = int(os.environ.get("PORT", 10000))
     logger.info(f"Starting Flask web server on port {port}...")
     web_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
