@@ -29,16 +29,12 @@ class Config:
     MAX_FILE_SIZE = 4194304000  # 4GB
     MAX_TOTAL_SIZE = 8388608000  # 8GB
     PART_SIZE = 1900 * 1024 * 1024  # 1900MB
-    CHUNK_SIZE = 128 * 1024 * 1024  # 128MB - حداکثر اندازه chunk
-    MAX_CONCURRENT_DOWNLOADS = 10  # حداکثر دانلود همزمان
-    MAX_CONCURRENT_UPLOADS = 8  # حداکثر آپلود همزمان
+    MAX_CONCURRENT_DOWNLOADS = 6  # دانلود همزمان
+    MAX_CONCURRENT_UPLOADS = 4  # آپلود همزمان
     RETRY_DELAY = 2  # کاهش تاخیر
-    PROGRESS_UPDATE_INTERVAL = 0.3  # بروزرسانی هر 0.3 ثانیه
+    PROGRESS_UPDATE_INTERVAL = 0.5  # بروزرسانی هر 0.5 ثانیه
     DATA_FILE = "user_data.json"
-    MAX_RETRIES = 8  # افزایش تلاش مجدد
-    CONNECTION_LIMIT = 100  # افزایش limit connection
-    READ_TIMEOUT = 30  # timeout برای خواندن
-    WRITE_TIMEOUT = 30  # timeout برای نوشتن
+    MAX_RETRIES = 5  # تلاش مجدد
 
 # ===== لاگ پیشرفته =====
 logging.basicConfig(
@@ -155,7 +151,7 @@ class ProgressTracker:
         self.last_text = ""
         self.last_percent = 0
         self.last_speed = 0
-        self.speed_history = deque(maxlen=20)  # افزایش تاریخچه سرعت
+        self.speed_history = deque(maxlen=10)
 
 progress_tracker = ProgressTracker()
 
@@ -174,8 +170,8 @@ async def progress_callback(current, total, message: Message, stage: str, file_n
         percent = (current / total) * 100
         eta = (total - current) / avg_speed if avg_speed > 0 else 0
         
-        # بروزرسانی هر 0.3 ثانیه یا اگر تغییر قابل توجهی وجود داشت
-        if now - progress_tracker.last_update < Config.PROGRESS_UPDATE_INTERVAL and abs(percent - progress_tracker.last_percent) < 1:
+        # بروزرسانی هر 0.5 ثانیه یا اگر تغییر قابل توجهی وجود داشت
+        if now - progress_tracker.last_update < Config.PROGRESS_UPDATE_INTERVAL and abs(percent - progress_tracker.last_percent) < 2:
             return
         
         progress_tracker.last_update = now
@@ -219,13 +215,12 @@ async def safe_download_media(message, file_path, progress_callback=None, file_n
                 progress_tracker.last_percent = 0
                 progress_tracker.speed_history.clear()
                 
-                # استفاده از chunk_size بزرگتر و timeoutهای بهینه
+                # دانلود بدون chunk_size (حذف پارامتر مشکل‌ساز)
                 await app.download_media(
                     message,
                     file_name=file_path,
                     progress=progress_callback,
-                    progress_args=(message, "📥 دانلود", file_name),
-                    chunk_size=Config.CHUNK_SIZE
+                    progress_args=(message, "📥 دانلود", file_name)
                 )
                 
                 if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
@@ -278,14 +273,14 @@ async def process_scheduled_tasks():
             except Exception as e:
                 logger.error(f"Scheduled task error: {e}")
         
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.5)
 
 async def process_task_queue():
     global processing
     
     while True:
         if not task_queue:
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.5)
             continue
         
         processing = True
@@ -297,7 +292,7 @@ async def process_task_queue():
             else:
                 await asyncio.to_thread(task_func, *args, **kwargs)
             
-            await asyncio.sleep(random.uniform(0.5, 1.5))
+            await asyncio.sleep(random.uniform(1.0, 2.0))
             
         except FloodWait as e:
             wait_time = e.value + random.uniform(5, 8)
@@ -389,6 +384,7 @@ async def upload_zip_part(zip_path: str, part_number: int, total_parts: int,
             max_retries = Config.MAX_RETRIES
             for attempt in range(max_retries):
                 try:
+                    # آپلود بدون chunk_size
                     await app.send_document(
                         chat_id,
                         zip_path,
@@ -399,8 +395,7 @@ async def upload_zip_part(zip_path: str, part_number: int, total_parts: int,
                         ),
                         progress=progress_callback,
                         progress_args=(processing_msg, "📤 آپلود", f"پارت {part_number + 1}"),
-                        reply_to_message_id=message_id,
-                        chunk_size=Config.CHUNK_SIZE
+                        reply_to_message_id=message_id
                     )
                     break
                     
@@ -552,7 +547,7 @@ async def start_zip(client, message: Message):
     if user_id not in user_files or not user_files[user_id]:
         await safe_send_message(
             message.chat.id,
-            "❌ **هیچ فایلی برای زیپ کردن وجود ندارد**\n\n"
+            "❌ **هиچ فایلی برای زیپ کردن وجود ندارد**\n\n"
             "📝 لطفاً ابتدا فایل‌ها را ارسال کنید",
             reply_to_message_id=message.id,
             parse_mode=enums.ParseMode.MARKDOWN
@@ -804,7 +799,7 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
                     else:
                         logger.error(f"Failed to download {file_name}")
                     
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.5)
                     
                 except Exception as e:
                     logger.error(f"Error processing file {finfo['file_name']}: {e}")
@@ -896,7 +891,7 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
                 except:
                     pass
                 
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(1)
             
             if successful_parts > 0:
                 result_text = (
@@ -969,9 +964,8 @@ async def run_bot():
         api_hash=Config.API_HASH,
         session_string=Config.SESSION_STRING,
         in_memory=True,
-        workers=100,  # افزایش تعداد workers
-        sleep_threshold=60,
-        max_concurrent_transmissions=20  # افزایش انتقال همزمان
+        workers=50,
+        sleep_threshold=60
     )
     
     asyncio.create_task(process_scheduled_tasks())
@@ -987,7 +981,7 @@ async def run_bot():
     app.on_callback_query()(handle_callback_query)
     
     await app.start()
-    logger.info("✅ Bot started successfully with maximum speed optimization!")
+    logger.info("✅ Bot started successfully!")
     
     async def periodic_save():
         while True:
