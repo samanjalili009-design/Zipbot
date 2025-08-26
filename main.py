@@ -199,24 +199,48 @@ async def create_single_zip(zip_path, files, password):
             zipf.write(file_info['path'], file_info['name'])
 
 def split_file(input_file, chunk_size=PART_SIZE):
-    """تقسیم فایل به بخش‌های کوچکتر"""
+    """تقسیم فایل به بخش‌های کوچکتر با مدیریت حافظه"""
     part_number = 1
     parts = []
     
-    with open(input_file, 'rb') as f:
-        while True:
-            chunk = f.read(chunk_size)
-            if not chunk:
-                break
-            
-            part_filename = f"{input_file}.part{part_number:03d}"
-            with open(part_filename, 'wb') as part_file:
-                part_file.write(chunk)
-            
-            parts.append(part_filename)
-            part_number += 1
-    
-    return parts
+    try:
+        file_size = os.path.getsize(input_file)
+        total_parts = math.ceil(file_size / chunk_size)
+        
+        logger.info(f"📦 Splitting file {file_size//1024//1024}MB into {total_parts} parts")
+        
+        with open(input_file, 'rb') as f:
+            for part_num in range(1, total_parts + 1):
+                part_filename = f"{input_file}.part{part_num:03d}"
+                
+                # خواندن و نوشتن به صورت chunk برای صرفه‌جویی در حافظه
+                bytes_written = 0
+                with open(part_filename, 'wb') as part_file:
+                    while bytes_written < chunk_size:
+                        remaining = chunk_size - bytes_written
+                        chunk = f.read(min(remaining, 1024 * 1024))  # 1MB chunks
+                        if not chunk:
+                            break
+                        part_file.write(chunk)
+                        bytes_written += len(chunk)
+                
+                if bytes_written > 0:
+                    parts.append(part_filename)
+                    logger.info(f"✅ Created part {part_num}: {bytes_written//1024//1024}MB")
+                else:
+                    break
+                
+        return parts
+        
+    except Exception as e:
+        logger.error(f"Error splitting file: {e}")
+        # پاکسازی فایل‌های ایجاد شده در صورت خطا
+        for part_file in parts:
+            try:
+                os.remove(part_file)
+            except:
+                pass
+        raise
 
 async def upload_zip_part(zip_path, part_number, total_parts, chat_id, message_id, password, processing_msg):
     """آپلود یک پارت زیپ"""
@@ -434,37 +458,60 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
             zip_size = os.path.getsize(zip_path)
             await processing_msg.edit_text(f"✅ فایل زیپ ایجاد شد. حجم: {zip_size//1024//1024}MB")
             
-            # تقسیم فایل زیپ به بخش‌های 500 مگابایتی
-            await processing_msg.edit_text("✂️ در حال تقسیم فایل زیپ به بخش‌های 500 مگابایتی...")
-            
-            parts = split_file(zip_path, PART_SIZE)
-            total_parts = len(parts)
-            
-            await processing_msg.edit_text(f"📦 فایل زیپ به {total_parts} بخش تقسیم شد.")
-            
-            # آپلود هر بخش
-            for part_index, part_path in enumerate(parts, 1):
-                await upload_zip_part(
-                    part_path, 
-                    part_index, 
-                    total_parts, 
-                    chat_id, 
-                    message_id, 
-                    zip_password,
-                    processing_msg
+            # بررسی نیاز به تقسیم
+            if zip_size <= PART_SIZE:
+                # اگر فایل کوچک است، مستقیم آپلود کن
+                await processing_msg.edit_text("📤 در حال آپلود فایل زیپ...")
+                
+                start_time = time.time()
+                await app.send_document(
+                    chat_id,
+                    zip_path,
+                    caption=f"🔑 رمز: `{zip_password}`\n💾 حجم: {zip_size//1024//1024}MB",
+                    progress=progress_bar,
+                    progress_args=(processing_msg, start_time, "آپلود فایل زیپ"),
+                    reply_to_message_id=message_id
                 )
                 
-                # حذف فایل پارت پس از آپلود
-                try:
-                    os.remove(part_path)
-                except:
-                    pass
-            
-            await safe_send_message(
-                chat_id,
-                f"✅ تمامی {total_parts} پارت زیپ آماده شد!\n🔑 رمز: `{zip_password}`",
-                reply_to_message_id=message_id
-            )
+                await safe_send_message(
+                    chat_id,
+                    f"✅ فایل زیپ آماده شد!\n🔑 رمز: `{zip_password}`",
+                    reply_to_message_id=message_id
+                )
+            else:
+                # تقسیم فایل زیپ به بخش‌های 500 مگابایتی
+                await processing_msg.edit_text("✂️ در حال تقسیم فایل زیپ به بخش‌های 500 مگابایتی...")
+                
+                # اجرای تقسیم در یک thread جداگانه برای جلوگیری از block شدن
+                loop = asyncio.get_event_loop()
+                parts = await loop.run_in_executor(None, split_file, zip_path, PART_SIZE)
+                
+                total_parts = len(parts)
+                await processing_msg.edit_text(f"✅ فایل زیپ به {total_parts} بخش تقسیم شد.")
+                
+                # آپلود هر بخش
+                for part_index, part_path in enumerate(parts, 1):
+                    await upload_zip_part(
+                        part_path, 
+                        part_index, 
+                        total_parts, 
+                        chat_id, 
+                        message_id, 
+                        zip_password,
+                        processing_msg
+                    )
+                    
+                    # حذف فایل پارت پس از آپلود
+                    try:
+                        os.remove(part_path)
+                    except:
+                        pass
+                
+                await safe_send_message(
+                    chat_id,
+                    f"✅ تمامی {total_parts} پارت زیپ آماده شد!\n🔑 رمز: `{zip_password}`",
+                    reply_to_message_id=message_id
+                )
             
     except FloodWait as e:
         logger.warning(f"⏰ Rescheduling zip task after {e.value} seconds")
@@ -483,8 +530,8 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
         logger.error(f"Error in zip processing: {e}", exc_info=True)
         await safe_send_message(
             chat_id,
-            "❌ خطایی در ایجاد فایل زیپ رخ داد.",
-            reply_to_message_id=message.id
+            f"❌ خطایی در ایجاد فایل زیپ رخ داد: {str(e)}",
+            reply_to_message_id=message_id
         )
     finally:
         # پاکسازی نهایی
