@@ -7,7 +7,7 @@ import sys
 import asyncio
 import aiohttp
 import aiofiles
-from pyrogram import Client, filters
+from pyrogram import Client, filters, enums
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import FloodWait, RPCError
 from flask import Flask
@@ -109,7 +109,7 @@ def format_time(seconds: int) -> str:
 
 async def safe_send_message(chat_id, text, reply_to_message_id=None, reply_markup=None, parse_mode=None):
     """ارسال پیام با مدیریت FloodWait و تلاش مجدد"""
-    max_retries = 5
+    max_retries = 3  # کاهش تعداد تلاش‌ها
     for attempt in range(max_retries):
         try:
             await asyncio.sleep(random.uniform(1.0, 3.0))
@@ -127,7 +127,18 @@ async def safe_send_message(chat_id, text, reply_to_message_id=None, reply_marku
         except Exception as e:
             logger.error(f"Error sending message (attempt {attempt + 1}): {e}")
             await asyncio.sleep(2)
-    logger.error(f"Failed to send message after {max_retries} attempts")
+    
+    # اگر همه تلاش‌ها ناموفق بودند، بدون parse_mode امتحان کن
+    try:
+        return await app.send_message(
+            chat_id, 
+            text, 
+            reply_to_message_id=reply_to_message_id,
+            reply_markup=reply_markup
+        )
+    except Exception as e:
+        logger.error(f"Failed to send message even without parse_mode: {e}")
+        return None
 
 async def safe_download_media(message, file_path, progress_callback=None):
     """دانلود با مدیریت FloodWait، قطع ارتباط و تلاش مجدد"""
@@ -197,11 +208,11 @@ async def progress_callback(current, total, message: Message, stage: str):
         bar = '█' * filled_length + '░' * (bar_length - filled_length)
         
         progress_text = (
-            f"**{stage}**\n\n"
+            f"{stage}\n\n"
             f"{bar} {percent:.1f}%\n\n"
-            f"📊 **پیشرفت:** {format_size(current)} / {format_size(total)}\n"
-            f"🚀 **سرعت:** {format_size(speed)}/ثانیه\n"
-            f"⏱️ **زمان باقیمانده:** {format_time(int(eta))}"
+            f"📊 پیشرفت: {format_size(current)} / {format_size(total)}\n"
+            f"🚀 سرعت: {format_size(speed)}/ثانیه\n"
+            f"⏱️ زمان باقیمانده: {format_time(int(eta))}"
         )
         
         # فقط اگر متن تغییر کرده آپدیت شود
@@ -356,8 +367,8 @@ async def upload_zip_part(zip_path: str, part_number: int, total_parts: int,
             part_size = os.path.getsize(zip_path)
             
             await processing_msg.edit_text(
-                f"📤 **در حال آپلود پارت {part_number + 1}/{total_parts}**\n"
-                f"📦 **حجم:** {format_size(part_size)}"
+                f"📤 در حال آپلود پارت {part_number + 1}/{total_parts}\n"
+                f"📦 حجم: {format_size(part_size)}"
             )
             
             # تنظیم زمان شروع برای progress callback
@@ -371,9 +382,9 @@ async def upload_zip_part(zip_path: str, part_number: int, total_parts: int,
                         chat_id,
                         zip_path,
                         caption=(
-                            f"📦 **پارت {part_number + 1}/{total_parts}**\n"
-                            f"🔑 **رمز:** `{password}`\n"
-                            f"💾 **حجم:** {format_size(part_size)}"
+                            f"📦 پارت {part_number + 1}/{total_parts}\n"
+                            f"🔑 رمز: `{password}`\n"
+                            f"💾 حجم: {format_size(part_size)}"
                         ),
                         progress=progress_callback,
                         progress_args=(processing_msg, f"آپلود پارت {part_number + 1}"),
@@ -417,20 +428,20 @@ async def start(client, message: Message):
         return
     
     welcome_text = (
-        "👋 **سلام! به ربات زیپ و آپلود پیشرفته خوش آمدید**\n\n"
-        "📦 **قابلیت‌های ربات:**\n"
+        "👋 سلام! به ربات زیپ و آپلود پیشرفته خوش آمدید\n\n"
+        "📦 قابلیت‌های ربات:\n"
         "• زیپ کردن فایل‌ها با رمزگذاری AES-256\n"
         "• تقسیم به پارت‌های خودکار زیر 2GB\n"
         "• دانلود و آپلود با قابلیت بازیابی\n"
         "• مدیریت محدودیت‌های تلگرام\n\n"
-        "📝 **روش استفاده:**\n"
+        "📝 روش استفاده:\n"
         "1. فایل‌ها را ارسال کنید (می‌توانید چندین فایل ارسال کنید)\n"
         "2. از کپشن `pass=رمز` برای رمز جداگانه هر فایل استفاده کنید\n"
         "3. دستور /zip را برای شروع فرآیند وارد کنید\n\n"
-        f"⚙️ **محدودیت‌ها:**\n"
+        f"⚙️ محدودیت‌ها:\n"
         f"• حداکثر حجم هر فایل: {format_size(Config.MAX_FILE_SIZE)}\n"
         f"• حداکثر حجم کل: {format_size(Config.MAX_TOTAL_SIZE)}\n\n"
-        "🛠 **برای لغو عملیات از /cancel استفاده کنید**"
+        "🛠 برای لغو عملیات از /cancel استفاده کنید"
     )
     
     keyboard = InlineKeyboardMarkup([
@@ -442,8 +453,7 @@ async def start(client, message: Message):
         message.chat.id,
         welcome_text,
         reply_to_message_id=message.id,
-        reply_markup=keyboard,
-        parse_mode="markdown"
+        reply_markup=keyboard
     )
 
 async def handle_file(client, message: Message):
@@ -481,11 +491,10 @@ async def handle_file(client, message: Message):
     if file_size > Config.MAX_FILE_SIZE:
         await safe_send_message(
             message.chat.id,
-            f"❌ **حجم فایل بیش از حد مجاز است!**\n"
+            f"❌ حجم فایل بیش از حد مجاز است!\n"
             f"📦 حجم فایل: {format_size(file_size)}\n"
             f"⚖️ حد مجاز: {format_size(Config.MAX_FILE_SIZE)}",
-            reply_to_message_id=message.id,
-            parse_mode="markdown"
+            reply_to_message_id=message.id
         )
         return
     
@@ -514,14 +523,13 @@ async def handle_file(client, message: Message):
     
     await safe_send_message(
         message.chat.id,
-        f"✅ **فایل ذخیره شد**\n\n"
-        f"📝 **نام:** {file_name}\n"
-        f"📦 **حجم:** {format_size(file_size)}\n"
-        f"🔑 **رمز:** {'`' + password + '`' if password else '❌ ندارد'}\n\n"
-        f"📊 **وضعیت فعلی:** {file_count} فایل ({format_size(total_size)})\n\n"
+        f"✅ فایل ذخیره شد\n\n"
+        f"📝 نام: {file_name}\n"
+        f"📦 حجم: {format_size(file_size)}\n"
+        f"🔑 رمز: {password if password else '❌ ندارد'}\n\n"
+        f"📊 وضعیت فعلی: {file_count} فایل ({format_size(total_size)})\n\n"
         f"📌 برای شروع زیپ از /zip استفاده کنید",
-        reply_to_message_id=message.id,
-        parse_mode="markdown"
+        reply_to_message_id=message.id
     )
     
     save_user_data()  # ذخیره وضعیت
@@ -534,10 +542,9 @@ async def start_zip(client, message: Message):
     if user_id not in user_files or not user_files[user_id]:
         await safe_send_message(
             message.chat.id,
-            "❌ **هیچ فایلی برای زیپ کردن وجود ندارد**\n\n"
+            "❌ هیچ فایلی برای زیپ کردن وجود ندارد\n\n"
             "📝 لطفاً ابتدا فایل‌ها را ارسال کنید",
-            reply_to_message_id=message.id,
-            parse_mode="markdown"
+            reply_to_message_id=message.id
         )
         return
     
@@ -545,12 +552,11 @@ async def start_zip(client, message: Message):
     if total_size > Config.MAX_TOTAL_SIZE:
         await safe_send_message(
             message.chat.id,
-            f"❌ **حجم کل فایل‌ها بیش از حد مجاز است!**\n\n"
+            f"❌ حجم کل فایل‌ها بیش از حد مجاز است!\n\n"
             f"📦 حجم کل: {format_size(total_size)}\n"
             f"⚖️ حد مجاز: {format_size(Config.MAX_TOTAL_SIZE)}\n\n"
             f"📌 لطفاً تعداد فایل‌ها را کاهش دهید",
-            reply_to_message_id=message.id,
-            parse_mode="markdown"
+            reply_to_message_id=message.id
         )
         user_files[user_id] = []
         save_user_data()
@@ -565,12 +571,11 @@ async def start_zip(client, message: Message):
     
     await safe_send_message(
         message.chat.id,
-        "🔐 **لطفاً رمز عبور برای فایل زیپ وارد کنید:**\n\n"
+        "🔐 لطفاً رمز عبور برای فایل زیپ وارد کنید:\n\n"
         "📝 می‌توانید از دکمه زیر برای بدون رمز استفاده کنید\n"
         "⚠️ توجه: رمز عبور باید حداقل 4 کاراکتر باشد",
         reply_to_message_id=message.id,
-        reply_markup=keyboard,
-        parse_mode="markdown"
+        reply_markup=keyboard
     )
 
 async def cancel_zip(client, message: Message):
@@ -586,11 +591,10 @@ async def cancel_zip(client, message: Message):
     
     await safe_send_message(
         message.chat.id,
-        "❌ **عملیات لغو شد**\n\n"
+        "❌ عملیات لغو شد\n\n"
         "✅ همه فایل‌های ذخیره شده پاک شدند\n"
         "📌 می‌توانید دوباره فایل‌ها را ارسال کنید",
-        reply_to_message_id=message.id,
-        parse_mode="markdown"
+        reply_to_message_id=message.id
     )
 
 async def process_zip(client, message: Message):
@@ -605,20 +609,18 @@ async def process_zip(client, message: Message):
         if not zip_password:
             await safe_send_message(
                 message.chat.id,
-                "❌ **رمز عبور نمی‌تواند خالی باشد**\n\n"
+                "❌ رمز عبور نمی‌تواند خالی باشد\n\n"
                 "📝 لطفاً یک رمز عبور معتبر وارد کنید",
-                reply_to_message_id=message.id,
-                parse_mode="markdown"
+                reply_to_message_id=message.id
             )
             return
         
         if len(zip_password) < 4:
             await safe_send_message(
                 message.chat.id,
-                "❌ **رمز عبور باید حداقل 4 کاراکتر باشد**\n\n"
+                "❌ رمز عبور باید حداقل 4 کاراکتر باشد\n\n"
                 "📝 لطفاً یک رمز قوی‌تر انتخاب کنید",
-                reply_to_message_id=message.id,
-                parse_mode="markdown"
+                reply_to_message_id=message.id
             )
             return
         
@@ -630,11 +632,10 @@ async def process_zip(client, message: Message):
         
         await safe_send_message(
             message.chat.id,
-            f"📝 **حالا نام فایل زیپ نهایی را وارد کنید**\n\n"
-            f"💡 پیشنهاد: `{suggested_name}`\n"
+            f"📝 حالا نام فایل زیپ نهایی را وارد کنید\n\n"
+            f"💡 پیشنهاد: {suggested_name}\n"
             f"⚠️ توجه: پسوند .zip اضافه خواهد شد",
-            reply_to_message_id=message.id,
-            parse_mode="markdown"
+            reply_to_message_id=message.id
         )
         return
     
@@ -643,9 +644,8 @@ async def process_zip(client, message: Message):
         if not zip_name:
             await safe_send_message(
                 message.chat.id,
-                "❌ **نام فایل نمی‌تواند خالی باشد**",
-                reply_to_message_id=message.id,
-                parse_mode="markdown"
+                "❌ نام فایل نمی‌تواند خالی باشد",
+                reply_to_message_id=message.id
             )
             return
         
@@ -668,16 +668,15 @@ async def process_zip(client, message: Message):
         
         await safe_send_message(
             message.chat.id,
-            f"📦 **خلاصه درخواست زیپ**\n\n"
-            f"📝 **نام فایل:** `{zip_name}.zip`\n"
-            f"🔑 **رمز:** `{password}`\n"
-            f"📊 **تعداد فایل‌ها:** {total_files}\n"
-            f"💾 **حجم کل:** {format_size(total_size)}\n\n"
-            f"⚠️ **توجه:** این عملیات ممکن است زمان بر باشد\n"
+            f"📦 خلاصه درخواست زیپ\n\n"
+            f"📝 نام فایل: {zip_name}.zip\n"
+            f"🔑 رمز: {password}\n"
+            f"📊 تعداد فایل‌ها: {total_files}\n"
+            f"💾 حجم کل: {format_size(total_size)}\n\n"
+            f"⚠️ توجه: این عملیات ممکن است زمان بر باشد\n"
             f"📌 برای شروع روی دکمه زیر کلیک کنید",
             reply_to_message_id=message.id,
-            reply_markup=keyboard,
-            parse_mode="markdown"
+            reply_markup=keyboard
         )
 
 async def handle_callback_query(client, callback_query):
@@ -692,30 +691,28 @@ async def handle_callback_query(client, callback_query):
         await callback_query.answer()
         await safe_send_message(
             user_id,
-            "📤 **حالت ارسال فایل فعال شد**\n\n"
+            "📤 حالت ارسال فایل فعال شد\n\n"
             "📝 می‌توانید فایل‌ها را ارسال کنید\n"
             "🔑 برای رمزگذاری از کپشن `pass=رمز` استفاده کنید\n"
-            "📌 پس از اتمام از /zip استفاده کنید",
-            parse_mode="markdown"
+            "📌 پس از اتمام از /zip استفاده کنید"
         )
     
     elif data == "help":
         await callback_query.answer()
         await safe_send_message(
             user_id,
-            "📖 **راهنمای کامل ربات**\n\n"
-            "1. **ارسال فایل‌ها:** فایل‌های خود را به ربات ارسال کنید\n"
-            "2. **رمزگذاری:** در کپشن از `pass=رمز` استفاده کنید\n"
-            "3. **شروع زیپ:** پس از ارسال همه فایل‌ها، /zip را بزنید\n"
-            "4. **تنظیمات:** رمز کلی و نام فایل را وارد کنید\n"
-            "5. **دریافت:** ربات فایل‌ها را زیپ و آپلود می‌کند\n\n"
-            "⚙️ **ویژگی‌های پیشرفته:**\n"
+            "📖 راهنمای کامل ربات\n\n"
+            "1. ارسال فایل‌ها: فایل‌های خود را به ربات ارسال کنید\n"
+            "2. رمزگذاری: در کپشن از `pass=رمز` استفاده کنید\n"
+            "3. شروع زیپ: پس از ارسال همه فایل‌ها، /zip را بزنید\n"
+            "4. تنظیمات: رمز کلی و نام فایل را وارد کنید\n"
+            "5. دریافت: ربات فایل‌ها را زیپ و آپلود می‌کند\n\n"
+            "⚙️ ویژگی‌های پیشرفته:\n"
             "• تقسیم خودکار به پارت‌های زیر 2GB\n"
             "• رمزگذاری AES-256\n"
             "• بازیابی از خطا\n"
             "• مدیریت محدودیت تلگرام\n\n"
-            "🛠 **پشتیبانی:** در صورت مشکل با /cancel شروع کنید",
-            parse_mode="markdown"
+            "🛠 پشتیبانی: در صورت مشکل با /cancel شروع کنید"
         )
     
     elif data == "no_password":
@@ -726,10 +723,9 @@ async def handle_callback_query(client, callback_query):
         suggested_name = f"archive_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         await safe_send_message(
             user_id,
-            f"📝 **حالا نام فایل زیپ نهایی را وارد کنید**\n\n"
-            f"💡 پیشنهاد: `{suggested_name}`\n"
-            f"⚠️ توجه: پسوند .zip اضافه خواهد شد",
-            parse_mode="markdown"
+            f"📝 حالا نام فایل زیپ نهایی را وارد کنید\n\n"
+            f"💡 پیشنهاد: {suggested_name}\n"
+            f"⚠️ توجه: پسوند .zip اضافه خواهد شد"
         )
     
     elif data == "confirm_zip":
@@ -748,7 +744,7 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
     processing_msg = None
     
     try:
-        processing_msg = await app.send_message(chat_id, "⏳ **در حال آماده‌سازی...**", parse_mode="markdown")
+        processing_msg = await app.send_message(chat_id, "⏳ در حال آماده‌سازی...")
         zip_password = user_states.get(f"{user_id}_password")
         
         # ایجاد دایرکتوری موقت
@@ -757,7 +753,7 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
             file_info_list = []
             
             # مرحله 1: دانلود همه فایل‌ها
-            await processing_msg.edit_text("📥 **در حال دانلود فایل‌ها...**", parse_mode="markdown")
+            await processing_msg.edit_text("📥 در حال دانلود فایل‌ها...")
             
             for i, finfo in enumerate(user_files[user_id], 1):
                 file_msg_id = finfo["message_id"]
@@ -774,9 +770,8 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
                     
                     # دانلود فایل با progress
                     await processing_msg.edit_text(
-                        f"📥 **در حال دانلود فایل {i}/{total_files}**\n"
-                        f"📝 **نام:** {file_name}",
-                        parse_mode="markdown"
+                        f"📥 در حال دانلود فایل {i}/{total_files}\n"
+                        f"📝 نام: {file_name}"
                     )
                     
                     success = await safe_download_media(
@@ -804,11 +799,11 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
                     continue
             
             if not file_info_list:
-                await processing_msg.edit_text("❌ **هیچ فایلی با موفقیت دانلود نشد**", parse_mode="markdown")
+                await processing_msg.edit_text("❌ هیچ فایلی با موفقیت دانلود نشد")
                 return
             
             # مرحله 2: ایجاد پارت‌ها به صورت هوشمند
-            await processing_msg.edit_text("📦 **در حال ایجاد پارت‌های زیپ...**", parse_mode="markdown")
+            await processing_msg.edit_text("📦 در حال ایجاد پارت‌های زیپ...")
             
             # مرتب کردن فایل‌ها بر اساس حجم (بزرگ به کوچک)
             file_info_list.sort(key=lambda x: x['size'], reverse=True)
@@ -843,9 +838,8 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
             
             num_parts = len(parts)
             await processing_msg.edit_text(
-                f"📦 **تقسیم به {num_parts} پارت**\n\n"
-                f"💾 حجم هر پارت: ~{format_size(Config.PART_SIZE)}",
-                parse_mode="markdown"
+                f"📦 تقسیم به {num_parts} پارت\n\n"
+                f"💾 حجم هر پارت: ~{format_size(Config.PART_SIZE)}"
             )
             
             # مرحله 3: ایجاد و آپلود هر پارت
@@ -861,9 +855,8 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
                 
                 # ایجاد زیپ برای این پارت
                 await processing_msg.edit_text(
-                    f"🗜️ **در حال فشرده‌سازی پارت {part_number}/{num_parts}**\n"
-                    f"📝 شامل {len(part_files)} فایل",
-                    parse_mode="markdown"
+                    f"🗜️ در حال فشرده‌سازی پارت {part_number}/{num_parts}\n"
+                    f"📝 شامل {len(part_files)} فایل"
                 )
                 
                 success = await create_zip_part(zip_path, part_files, part_password)
@@ -901,22 +894,21 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
             # نتیجه نهایی
             if successful_parts > 0:
                 result_text = (
-                    f"✅ **عملیات با موفقیت завер شد!**\n\n"
-                    f"📦 **پارت‌های ایجاد شده:** {successful_parts}/{num_parts}\n"
-                    f"🔑 **رمز اصلی:** `{zip_password or 'بدون رمز'}`\n\n"
-                    f"📌 **نکات مهم:**\n"
+                    f"✅ عملیات با موفقیت завер شد!\n\n"
+                    f"📦 پارت‌های ایجاد شده: {successful_parts}/{num_parts}\n"
+                    f"🔑 رمز اصلی: {zip_password or 'بدون رمز'}\n\n"
+                    f"📌 نکات مهم:\n"
                     f"• برای extract همه پارت‌ها را دانلود کنید\n"
                     f"• از رمز یکسان برای همه پارت‌ها استفاده کنید\n"
                     f"• فایل‌ها به طور خودکار حذف شدند"
                 )
             else:
-                result_text = "❌ **خطا در ایجاد پارت‌ها**\n\nلطفاً دوباره تلاش کنید"
+                result_text = "❌ خطا در ایجاد پارت‌ها\n\nلطفاً دوباره تلاش کنید"
             
             await safe_send_message(
                 chat_id,
                 result_text,
-                reply_to_message_id=message_id,
-                parse_mode="markdown"
+                reply_to_message_id=message_id
             )
             
     except FloodWait as e:
@@ -924,10 +916,9 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
         
         if processing_msg:
             await processing_msg.edit_text(
-                f"⏳ **عملیات متوقف شد due to limit**\n\n"
-                f"🕒 **ادامه بعد از:** {e.value} ثانیه\n"
-                f"✅ به طور خودکار ادامه خواهد یافت",
-                parse_mode="markdown"
+                f"⏳ عملیات متوقف شد due to limit\n\n"
+                f"🕒 ادامه بعد از: {e.value} ثانیه\n"
+                f"✅ به طور خودکار ادامه خواهد یافت"
             )
         
         # زمان‌بندی مجدد
@@ -937,9 +928,8 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
         logger.error(f"خطا در پردازش زیپ: {e}", exc_info=True)
         if processing_msg:
             await processing_msg.edit_text(
-                "❌ **خطایی در پردازش رخ داد**\n\n"
-                "📌 لطفاً دوباره تلاش کنید یا با پشتیبانی تماس بگیرید",
-                parse_mode="markdown"
+                "❌ خطایی در پردازش رخ داد\n\n"
+                "📌 لطفاً دوباره تلاش کنید یا با پشتیبانی تماس بگیرید"
             )
     finally:
         # پاکسازی نهایی
