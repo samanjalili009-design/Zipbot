@@ -191,6 +191,7 @@ async def upload_zip_part(zip_path, part_number, total_parts, chat_id, message_i
     """آپلود یک پارت زیپ"""
     try:
         part_size = os.path.getsize(zip_path)
+        part_name = os.path.basename(zip_path)
         
         await processing_msg.edit_text(
             f"📤 در حال آپلود پارت {part_number + 1}/{total_parts}\n"
@@ -202,10 +203,10 @@ async def upload_zip_part(zip_path, part_number, total_parts, chat_id, message_i
             chat_id,
             zip_path,
             caption=(
-                f"📦 پارت {part_number + 1}/{total_parts}\n"
+                f"📦 پارت {part_number + 1}/{total_parts} - {part_name}\n"
                 f"🔑 رمز: `{password}`\n"
                 f"💾 حجم: {part_size // 1024 // 1024}MB\n"
-                f"💡 برای extract: همه پارت‌ها رو دانلود کرده و با WinRAR/7Zip باز کنید"
+                f"💡 برای ادغام: همه پارت‌ها رو دانلود کرده و دستور cat رو اجرا کنید"
             ),
             progress=progress_bar,
             progress_args=(processing_msg, start_time, f"آپلود پارت {part_number + 1}"),
@@ -221,6 +222,30 @@ async def upload_zip_part(zip_path, part_number, total_parts, chat_id, message_i
     except Exception as e:
         logger.error(f"Error uploading part {part_number}: {e}")
         raise
+
+def split_file(input_path, output_pattern, chunk_size):
+    """تقسیم فایل به قسمت‌های کوچکتر"""
+    try:
+        # استفاده از دستور split برای تقسیم استاندارد
+        command = f"split -b {chunk_size} -d '{input_path}' '{output_pattern}'"
+        result = os.system(command)
+        return result == 0
+    except:
+        # fallback: تقسیم دستی
+        try:
+            with open(input_path, 'rb') as f:
+                part_num = 0
+                while True:
+                    chunk = f.read(chunk_size)
+                    if not chunk:
+                        break
+                    part_path = f"{output_pattern}{part_num:02d}"
+                    with open(part_path, 'wb') as part_file:
+                        part_file.write(chunk)
+                    part_num += 1
+            return True
+        except:
+            return False
 
 # ===== هندلرها =====
 async def start(client, message):
@@ -391,7 +416,7 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
                 await asyncio.sleep(2)
             
             # ایجاد یک زیپ بزرگ از همه فایل‌ها
-            master_zip_path = os.path.join(tmp_dir, f"{zip_name}_master.zip")
+            master_zip_path = os.path.join(tmp_dir, f"{zip_name}.zip")
             
             await processing_msg.edit_text("📦 در حال ایجاد فایل زیپ اصلی...")
             
@@ -405,60 +430,63 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
                 for file_path, file_name in all_files:
                     zipf.write(file_path, file_name)
             
-            # تقسیم زیپ بزرگ به پارت‌های 500MB
+            # بررسی حجم زیپ
             master_zip_size = os.path.getsize(master_zip_path)
-            num_parts = math.ceil(master_zip_size / PART_SIZE)
             
-            await processing_msg.edit_text(f"✂️ در حال تقسیم به {num_parts} پارت...")
-            
-            # تقسیم فایل زیپ به پارت‌ها
-            part_number = 1
-            with open(master_zip_path, 'rb') as master_file:
-                while True:
-                    part_data = master_file.read(PART_SIZE)
-                    if not part_data:
-                        break
+            if master_zip_size <= PART_SIZE:
+                # اگر حجم زیپ کمتر از 500MB است،直接 آپلود کن
+                await processing_msg.edit_text("📤 در حال آپلود فایل زیپ...")
+                
+                start_time = time.time()
+                await app.send_document(
+                    chat_id,
+                    master_zip_path,
+                    caption=(
+                        f"✅ فایل زیپ آماده شد!\n🔑 رمز: `{zip_password}`\n"
+                        f"📦 حجم: {master_zip_size//1024//1024}MB\n"
+                        f"📦 تعداد فایل‌ها: {total_files}"
+                    ),
+                    progress=progress_bar,
+                    progress_args=(processing_msg, start_time, "آپلود"),
+                    reply_to_message_id=message_id
+                )
+                
+            else:
+                # اگر حجم زیپ بیشتر از 500MB است، تقسیم کن
+                num_parts = math.ceil(master_zip_size / PART_SIZE)
+                await processing_msg.edit_text(f"✂️ در حال تقسیم به {num_parts} پارت...")
+                
+                # تقسیم فایل
+                output_pattern = os.path.join(tmp_dir, f"{zip_name}_part")
+                success = split_file(master_zip_path, output_pattern, PART_SIZE)
+                
+                if not success:
+                    raise Exception("خطا در تقسیم فایل")
+                
+                # پیدا کردن فایل‌های تقسیم شده
+                part_files = sorted([f for f in os.listdir(tmp_dir) if f.startswith(zip_name + "_part")])
+                
+                # آپلود هر پارت
+                for part_index, part_file in enumerate(part_files):
+                    part_path = os.path.join(tmp_dir, part_file)
                     
-                    part_path = os.path.join(tmp_dir, f"{zip_name}_part{part_number:03d}.zip")
-                    
-                    with open(part_path, 'wb') as part_file:
-                        part_file.write(part_data)
-                    
-                    # آپلود پارت
                     await upload_zip_part(
                         part_path, 
-                        part_number - 1, 
-                        num_parts, 
+                        part_index, 
+                        len(part_files), 
                         chat_id, 
                         message_id, 
                         zip_password,
                         processing_msg
                     )
-                    
-                    # حذف فایل موقت پارت
-                    try:
-                        os.remove(part_path)
-                    except:
-                        pass
-                    
-                    part_number += 1
-            
-            # حذف فایل‌های موقت
-            for file_path, file_name in all_files:
-                try:
-                    os.remove(file_path)
-                except:
-                    pass
-            try:
-                os.remove(master_zip_path)
-            except:
-                pass
             
             await safe_send_message(
                 chat_id,
-                f"✅ تمامی {num_parts} پارت زیپ آماده شد!\n🔑 رمز: `{zip_password}`\n"
-                f"💡 برای extract کردن: همه پارت‌ها رو دانلود کرده و با WinRAR/7Zip باز کنید\n"
-                f"📦 حجم کل: {master_zip_size//1024//1024}MB",
+                f"✅ عملیات زیپ کامل شد!\n🔑 رمز: `{zip_password}`\n"
+                f"📦 تعداد فایل‌ها: {total_files}\n"
+                f"💡 برای ادغام پارت‌ها در لینوکس/Mac:\n"
+                f"`cat {zip_name}_part* > {zip_name}.zip`\n"
+                f"💡 در ویندوز از برنامه HJSplit استفاده کنید",
                 reply_to_message_id=message_id
             )
             
