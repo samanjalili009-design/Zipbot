@@ -7,7 +7,7 @@ import sys
 import asyncio
 from pyrogram import Client, filters
 from pyrogram.types import Message
-from pyrogram.errors import FloodWait
+from pyrogram.errors import FloodWait, RPCError
 from flask import Flask
 import threading
 from collections import deque
@@ -41,6 +41,8 @@ user_states: Dict[int, Any] = {}
 scheduled_tasks: List[Tuple[float, Callable, Tuple, Dict]] = []
 task_queue = deque()
 processing = False
+upload_attempts: Dict[str, int] = {}
+progress_cache: Dict[int, str] = {}  # کش برای ذخیره آخرین وضعیت پیشرفت
 
 # ===== فانکشن‌های کمکی =====
 def is_user_allowed(user_id: int) -> bool:
@@ -74,7 +76,7 @@ async def safe_download_media(message, file_path, progress=None, progress_args=N
         return False
 
 async def progress_bar(current, total, message: Message, start_time, stage="دانلود"):
-    """نوار پیشرفت با تاخیرهای کنترل شده"""
+    """نوار پیشرفت با مدیریت خطای MESSAGE_NOT_MODIFIED"""
     try:
         now = time.time()
         diff = now - start_time
@@ -83,21 +85,55 @@ async def progress_bar(current, total, message: Message, start_time, stage="دا
         
         percent = int(current * 100 / total)
         
-        if percent % 5 != 0 and current != total:
+        # فقط هر 10% آپدیت کن یا اگر نزدیک به پایان است
+        update_threshold = 10
+        if (percent % update_threshold != 0 and 
+            current != total and 
+            (total - current) > 10 * 1024 * 1024 and
+            percent != 100):
             return
-            
+        
         speed = current / diff
+        speed_mb = speed / (1024 * 1024)
         eta = int((total - current) / speed) if speed > 0 else 0
+        
+        # فقط اگر سرعت معقولی داریم ETA را نمایش دهیم
+        eta_text = f"\n⏰ {eta}ثانیه" if speed > 1024 * 1024 else ""
+        
         bar_filled = int(percent / 5)
         bar = "▓" * bar_filled + "░" * (20 - bar_filled)
         
-        text = f"🚀 {stage} فایل...\n{bar} {percent}%\n📦 {current//1024//1024}MB / {total//1024//1024}MB"
+        new_text = (
+            f"🚀 {stage}...\n"
+            f"{bar} {percent}%\n"
+            f"📦 {current//1024//1024}MB / {total//1024//1024}MB\n"
+            f"⚡ {speed_mb:.1f}MB/s"
+            f"{eta_text}"
+        )
         
-        await message.edit_text(text)
-        await asyncio.sleep(1)
+        # بررسی کش برای جلوگیری از edit تکراری
+        message_id = message.id
+        if progress_cache.get(message_id) == new_text:
+            return
+            
+        # فقط اگر متن تغییر کرده باشد edit کن
+        try:
+            await message.edit_text(new_text)
+            progress_cache[message_id] = new_text
+        except FloodWait as e:
+            logger.warning(f"FloodWait in progress: {e.value} seconds")
+            await asyncio.sleep(e.value)
+        except Exception as e:
+            if "MESSAGE_NOT_MODIFIED" not in str(e):
+                logger.error(f"Progress edit error: {e}")
+            # حتی اگر خطای MESSAGE_NOT_MODIFIED بود، کش را آپدیت کن
+            progress_cache[message_id] = new_text
+        
+        await asyncio.sleep(3)  # کاهش فرکانس آپدیت
         
     except Exception as e:
-        logger.error(f"Progress error: {e}")
+        if "MESSAGE_NOT_MODIFIED" not in str(e):
+            logger.error(f"Progress error: {e}")
 
 def schedule_task(task_func: Callable, delay: float, *args, **kwargs):
     """زمان‌بندی یک تسک برای اجرای بعدی"""
@@ -242,38 +278,92 @@ def split_file(input_file, chunk_size=PART_SIZE):
                 pass
         raise
 
+async def upload_with_retry(document, chat_id, caption, progress_callback, progress_args, max_retries=3):
+    """آپلود با قابلیت تلاش مجدد"""
+    retry_count = 0
+    file_id = os.path.basename(document)
+    
+    while retry_count < max_retries:
+        try:
+            await asyncio.sleep(random.uniform(5.0, 15.0))  # تاخیر تصادفی قبل از آپلود
+            
+            result = await app.send_document(
+                chat_id,
+                document,
+                caption=caption,
+                progress=progress_callback,
+                progress_args=progress_args
+            )
+            
+            upload_attempts.pop(file_id, None)
+            return result
+            
+        except FloodWait as e:
+            wait_time = e.value + random.randint(5, 15)
+            logger.warning(f"📤 FloodWait during upload: {wait_time} seconds")
+            
+            await asyncio.sleep(wait_time)
+            retry_count += 1
+            
+        except RPCError as e:
+            logger.error(f"RPC Error during upload: {e}")
+            retry_count += 1
+            await asyncio.sleep(30)  # تاخیر طولانی‌تر برای خطاهای RPC
+            
+        except Exception as e:
+            logger.error(f"Unexpected error during upload: {e}")
+            retry_count += 1
+            await asyncio.sleep(10)
+    
+    raise Exception(f"Failed to upload after {max_retries} attempts")
+
 async def upload_zip_part(zip_path, part_number, total_parts, chat_id, message_id, password, processing_msg):
-    """آپلود یک پارت زیپ"""
+    """آپلود یک پارت زیپ با مدیریت خطا"""
     try:
         part_size = os.path.getsize(zip_path)
+        file_id = f"{os.path.basename(zip_path)}_{part_number}"
+        
+        if file_id not in upload_attempts:
+            upload_attempts[file_id] = 0
+        upload_attempts[file_id] += 1
+        
+        if upload_attempts[file_id] > 3:
+            logger.error(f"❌ Too many upload attempts for {file_id}")
+            raise Exception("Too many upload attempts")
         
         await processing_msg.edit_text(
             f"📤 در حال آپلود پارت {part_number}/{total_parts}\n"
-            f"📦 حجم: {part_size // 1024 // 1024}MB"
+            f"📦 حجم: {part_size // 1024 // 1024}MB\n"
+            f"♻️ تلاش: {upload_attempts[file_id]}/3"
         )
         
         start_time = time.time()
-        await app.send_document(
-            chat_id,
-            zip_path,
-            caption=(
-                f"📦 پارت {part_number}/{total_parts}\n"
-                f"🔑 رمز: `{password}`\n"
-                f"💾 حجم: {part_size // 1024 // 1024}MB"
-            ),
-            progress=progress_bar,
-            progress_args=(processing_msg, start_time, f"آپلود پارت {part_number}"),
-            reply_to_message_id=message_id
+        caption = (
+            f"📦 پارت {part_number}/{total_parts}\n"
+            f"🔑 رمز: `{password}`\n"
+            f"💾 حجم: {part_size // 1024 // 1024}MB"
         )
         
-        await asyncio.sleep(random.uniform(5.0, 10.0))
+        # استفاده از تابع آپلود با قابلیت تلاش مجدد
+        await upload_with_retry(
+            zip_path,
+            chat_id,
+            caption,
+            progress_bar,
+            (processing_msg, start_time, f"آپلود پارت {part_number}")
+        )
+        
+        logger.info(f"✅ Successfully uploaded part {part_number}")
+        await asyncio.sleep(random.uniform(10.0, 20.0))  # تاخیر بیشتر بین آپلودها
         
     except FloodWait as e:
-        # زمان‌بندی مجدد
-        schedule_task(upload_zip_part, e.value + 10, zip_path, part_number, total_parts, chat_id, message_id, password, processing_msg)
+        logger.warning(f"⏰ FloodWait in upload: {e.value} seconds")
+        # زمان‌بندی مجدد با تاخیر بیشتر
+        schedule_task(upload_zip_part, e.value + 20, zip_path, part_number, total_parts, chat_id, message_id, password, processing_msg)
         raise
+        
     except Exception as e:
-        logger.error(f"Error uploading part {part_number}: {e}")
+        logger.error(f"❌ Error uploading part {part_number}: {e}")
         raise
 
 # ===== هندلرها =====
@@ -464,13 +554,12 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
                 await processing_msg.edit_text("📤 در حال آپلود فایل زیپ...")
                 
                 start_time = time.time()
-                await app.send_document(
-                    chat_id,
+                await upload_with_retry(
                     zip_path,
-                    caption=f"🔑 رمز: `{zip_password}`\n💾 حجم: {zip_size//1024//1024}MB",
-                    progress=progress_bar,
-                    progress_args=(processing_msg, start_time, "آپلود فایل زیپ"),
-                    reply_to_message_id=message_id
+                    chat_id,
+                    f"🔑 رمز: `{zip_password}`\n💾 حجم: {zip_size//1024//1024}MB",
+                    progress_bar,
+                    (processing_msg, start_time, "آپلود فایل زیپ")
                 )
                 
                 await safe_send_message(
@@ -539,6 +628,8 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
             user_files[user_id] = []
         user_states.pop(user_id, None)
         user_states.pop(f"{user_id}_password", None)
+        # پاکسازی کش پیشرفت
+        progress_cache.clear()
 
 # ===== فیلتر پیام‌های غیردستوری =====
 def non_command_filter(_, __, message: Message):
