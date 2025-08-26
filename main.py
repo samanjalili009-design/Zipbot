@@ -29,13 +29,16 @@ class Config:
     MAX_FILE_SIZE = 4194304000  # 4GB
     MAX_TOTAL_SIZE = 8388608000  # 8GB
     PART_SIZE = 1900 * 1024 * 1024  # 1900MB
-    CHUNK_SIZE = 64 * 1024 * 1024  # 64MB برای افزایش سرعت
-    MAX_CONCURRENT_DOWNLOADS = 4  # افزایش دانلود همزمان
-    MAX_CONCURRENT_UPLOADS = 3  # افزایش آپلود همزمان
-    RETRY_DELAY = 5  # کاهش تاخیر
-    PROGRESS_UPDATE_INTERVAL = 0.5  # بروزرسانی هر 0.5 ثانیه
+    CHUNK_SIZE = 128 * 1024 * 1024  # 128MB - حداکثر اندازه chunk
+    MAX_CONCURRENT_DOWNLOADS = 10  # حداکثر دانلود همزمان
+    MAX_CONCURRENT_UPLOADS = 8  # حداکثر آپلود همزمان
+    RETRY_DELAY = 2  # کاهش تاخیر
+    PROGRESS_UPDATE_INTERVAL = 0.3  # بروزرسانی هر 0.3 ثانیه
     DATA_FILE = "user_data.json"
-    MAX_RETRIES = 5  # افزایش تلاش مجدد
+    MAX_RETRIES = 8  # افزایش تلاش مجدد
+    CONNECTION_LIMIT = 100  # افزایش limit connection
+    READ_TIMEOUT = 30  # timeout برای خواندن
+    WRITE_TIMEOUT = 30  # timeout برای نوشتن
 
 # ===== لاگ پیشرفته =====
 logging.basicConfig(
@@ -106,11 +109,11 @@ def format_time(seconds: int) -> str:
 
 def get_progress_bar(percentage: float, length: int = 20) -> str:
     filled = int(length * percentage / 100)
-    bar = "⬢" * filled + "⬡" * (length - filled)
+    bar = "█" * filled + "░" * (length - filled)
     return f"{bar}"
 
 def get_animated_progress(percentage: float) -> str:
-    animations = ["▰", "▱", "■", "□", "●", "○", "◆", "◇"]
+    animations = ["🟦", "⬜", "🔷", "🔶", "🟩", "🟥"]
     filled = int(percentage / 10)
     return animations[0] * filled + animations[1] * (10 - filled)
 
@@ -118,7 +121,7 @@ async def safe_send_message(chat_id, text, reply_to_message_id=None, reply_marku
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            await asyncio.sleep(random.uniform(0.5, 1.5))
+            await asyncio.sleep(random.uniform(0.1, 0.5))
             return await app.send_message(
                 chat_id, 
                 text, 
@@ -127,12 +130,12 @@ async def safe_send_message(chat_id, text, reply_to_message_id=None, reply_marku
                 parse_mode=parse_mode
             )
         except FloodWait as e:
-            wait_time = e.value + random.uniform(1, 3)
+            wait_time = e.value + random.uniform(0.5, 2)
             logger.warning(f"FloodWait: {wait_time} seconds (attempt {attempt + 1}/{max_retries})")
             await asyncio.sleep(wait_time)
         except Exception as e:
             logger.error(f"Error sending message (attempt {attempt + 1}): {e}")
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
     
     try:
         return await app.send_message(
@@ -152,7 +155,7 @@ class ProgressTracker:
         self.last_text = ""
         self.last_percent = 0
         self.last_speed = 0
-        self.speed_history = deque(maxlen=10)
+        self.speed_history = deque(maxlen=20)  # افزایش تاریخچه سرعت
 
 progress_tracker = ProgressTracker()
 
@@ -171,8 +174,8 @@ async def progress_callback(current, total, message: Message, stage: str, file_n
         percent = (current / total) * 100
         eta = (total - current) / avg_speed if avg_speed > 0 else 0
         
-        # بروزرسانی هر 0.5 ثانیه یا اگر تغییر قابل توجهی وجود داشت
-        if now - progress_tracker.last_update < Config.PROGRESS_UPDATE_INTERVAL and abs(percent - progress_tracker.last_percent) < 2:
+        # بروزرسانی هر 0.3 ثانیه یا اگر تغییر قابل توجهی وجود داشت
+        if now - progress_tracker.last_update < Config.PROGRESS_UPDATE_INTERVAL and abs(percent - progress_tracker.last_percent) < 1:
             return
         
         progress_tracker.last_update = now
@@ -184,13 +187,12 @@ async def progress_callback(current, total, message: Message, stage: str, file_n
         progress_text = (
             f"**{stage}**\n\n"
             f"{bar}\n"
-            f"**{percent:.1f}%** ({animated_bar})\n\n"
-            f"📁 **فایل:** `{file_name[:25]}{'...' if len(file_name) > 25 else ''}`\n"
+            f"**{percent:.1f}%** {animated_bar}\n\n"
+            f"📁 **فایل:** `{file_name[:20]}{'...' if len(file_name) > 20 else ''}`\n"
             f"📊 **حجم:** `{format_size(current)} / {format_size(total)}`\n"
             f"⚡ **سرعت:** `{format_size(int(avg_speed))}/s`\n"
             f"⏰ **زمان باقیمانده:** `{format_time(int(eta))}`\n"
-            f"🕐 **زمان سپری شده:** `{format_time(int(elapsed))}`\n"
-            f"📈 **پیشرفت:** `{percent:.1f}%`"
+            f"🕐 **زمان سپری شده:** `{format_time(int(elapsed))}`"
         )
         
         if progress_tracker.last_text != progress_text:
@@ -208,7 +210,7 @@ async def safe_download_media(message, file_path, progress_callback=None, file_n
     for attempt in range(max_retries):
         try:
             async with download_semaphore:
-                await asyncio.sleep(random.uniform(0.5, 1.5))
+                await asyncio.sleep(random.uniform(0.1, 0.3))
                 
                 os.makedirs(os.path.dirname(file_path), exist_ok=True)
                 
@@ -217,7 +219,7 @@ async def safe_download_media(message, file_path, progress_callback=None, file_n
                 progress_tracker.last_percent = 0
                 progress_tracker.speed_history.clear()
                 
-                # استفاده از chunk_size بزرگتر برای افزایش سرعت
+                # استفاده از chunk_size بزرگتر و timeoutهای بهینه
                 await app.download_media(
                     message,
                     file_name=file_path,
@@ -232,7 +234,7 @@ async def safe_download_media(message, file_path, progress_callback=None, file_n
                     logger.warning(f"Downloaded file is empty or missing (attempt {attempt + 1})")
                     
         except FloodWait as e:
-            wait_time = e.value + random.uniform(3, 7)
+            wait_time = e.value + random.uniform(1, 3)
             logger.warning(f"Download FloodWait: {wait_time} seconds (attempt {attempt + 1})")
             await asyncio.sleep(wait_time)
         except (RPCError, aiohttp.ClientError, OSError) as e:
@@ -276,14 +278,14 @@ async def process_scheduled_tasks():
             except Exception as e:
                 logger.error(f"Scheduled task error: {e}")
         
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.1)
 
 async def process_task_queue():
     global processing
     
     while True:
         if not task_queue:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.1)
             continue
         
         processing = True
@@ -295,10 +297,10 @@ async def process_task_queue():
             else:
                 await asyncio.to_thread(task_func, *args, **kwargs)
             
-            await asyncio.sleep(random.uniform(1.0, 3.0))
+            await asyncio.sleep(random.uniform(0.5, 1.5))
             
         except FloodWait as e:
-            wait_time = e.value + random.uniform(8, 12)
+            wait_time = e.value + random.uniform(5, 8)
             logger.warning(f"🕒 FloodWait detected: {wait_time} seconds. Rescheduling task...")
             
             schedule_task(task_func, wait_time, *args, **kwargs)
@@ -307,11 +309,11 @@ async def process_task_queue():
             if user_id:
                 await notify_user_floodwait(user_id, wait_time)
             
-            await asyncio.sleep(3)
+            await asyncio.sleep(2)
             
         except Exception as e:
             logger.error(f"Task error: {e}")
-            await asyncio.sleep(3)
+            await asyncio.sleep(2)
         
         finally:
             processing = False
@@ -340,11 +342,11 @@ async def create_zip_part(zip_path: str, files: List[Dict], password: Optional[s
     try:
         os.makedirs(os.path.dirname(zip_path), exist_ok=True)
         
+        # عدم استفاده از فشرده‌سازی برای افزایش سرعت
         with pyzipper.AESZipFile(
             zip_path, 
             "w", 
-            compression=pyzipper.ZIP_DEFLATED,
-            compresslevel=4,  # کاهش سطح فشرده‌سازی برای افزایش سرعت
+            compression=pyzipper.ZIP_STORED,  # بدون فشرده‌سازی
             encryption=pyzipper.WZ_AES
         ) as zipf:
             if password:
@@ -398,14 +400,14 @@ async def upload_zip_part(zip_path: str, part_number: int, total_parts: int,
                         progress=progress_callback,
                         progress_args=(processing_msg, "📤 آپلود", f"پارت {part_number + 1}"),
                         reply_to_message_id=message_id,
-                        chunk_size=Config.CHUNK_SIZE  # افزایش chunk_size برای آپلود
+                        chunk_size=Config.CHUNK_SIZE
                     )
                     break
                     
                 except FloodWait as e:
                     if attempt == max_retries - 1:
                         raise
-                    wait_time = e.value + random.uniform(3, 7)
+                    wait_time = e.value + random.uniform(2, 5)
                     logger.warning(f"Upload FloodWait: {wait_time} seconds (attempt {attempt + 1})")
                     await asyncio.sleep(wait_time)
                 except Exception as e:
@@ -414,11 +416,11 @@ async def upload_zip_part(zip_path: str, part_number: int, total_parts: int,
                     logger.error(f"Upload error (attempt {attempt + 1}): {e}")
                     await asyncio.sleep(Config.RETRY_DELAY)
             
-            await asyncio.sleep(random.uniform(2.0, 4.0))
+            await asyncio.sleep(random.uniform(1.0, 2.0))
             return True
             
     except FloodWait as e:
-        wait_time = e.value + random.uniform(8, 12)
+        wait_time = e.value + random.uniform(6, 10)
         schedule_task(
             upload_zip_part, 
             wait_time, 
@@ -802,7 +804,7 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
                     else:
                         logger.error(f"Failed to download {file_name}")
                     
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.1)
                     
                 except Exception as e:
                     logger.error(f"Error processing file {finfo['file_name']}: {e}")
@@ -894,7 +896,7 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
                 except:
                     pass
                 
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.5)
             
             if successful_parts > 0:
                 result_text = (
@@ -960,12 +962,16 @@ async def run_bot():
     
     load_user_data()
     
+    # ایجاد کلاینت با تنظیمات بهینه
     app = Client(
         "user_bot",
         api_id=Config.API_ID,
         api_hash=Config.API_HASH,
         session_string=Config.SESSION_STRING,
-        in_memory=True
+        in_memory=True,
+        workers=100,  # افزایش تعداد workers
+        sleep_threshold=60,
+        max_concurrent_transmissions=20  # افزایش انتقال همزمان
     )
     
     asyncio.create_task(process_scheduled_tasks())
@@ -981,7 +987,7 @@ async def run_bot():
     app.on_callback_query()(handle_callback_query)
     
     await app.start()
-    logger.info("✅ Bot started successfully with advanced features!")
+    logger.info("✅ Bot started successfully with maximum speed optimization!")
     
     async def periodic_save():
         while True:
