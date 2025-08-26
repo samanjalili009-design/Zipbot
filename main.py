@@ -658,6 +658,48 @@ async def process_zip(client, message: Message):
         
         # نمایش خلاصه و تایید نهایی
         total_files = len(user_files[user_id])
+
+async def process_zip(client, message: Message):
+    user_id = message.from_user.id
+    
+    if user_id not in user_states:
+        return
+    
+    # حالت انتظار برای رمز
+    if user_states.get(user_id) == "waiting_password":
+        zip_password = message.text.strip()
+        
+        if not zip_password:
+            await message.reply("❌ رمز عبور نمی‌تواند خالی باشد")
+            return
+        
+        if len(zip_password) < 4:
+            await message.reply("❌ رمز عبور باید حداقل 4 کاراکتر باشد")
+            return
+        
+        user_states[user_id] = "waiting_filename"
+        user_states[f"{user_id}_password"] = zip_password
+        
+        suggested_name = f"archive_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        await message.reply(f"📝 نام فایل زیپ را وارد کنید:\n💡 پیشنهاد: {suggested_name}")
+        return
+    
+    # حالت انتظار برای نام فایل
+    if user_states.get(user_id) == "waiting_filename":
+        zip_name = message.text.strip()
+        if not zip_name:
+            await message.reply("❌ نام فایل نمی‌تواند خالی باشد")
+            return
+        
+        # پاک کردن کاراکترهای غیرمجاز
+        import re
+        zip_name = re.sub(r'[<>:"/\\|?*]', '_', zip_name)
+        zip_name = zip_name[:50]
+        
+        user_states[f"{user_id}_zipname"] = zip_name
+        
+        # محاسبه اطلاعات
+        total_files = len(user_files[user_id])
         total_size = sum(f["file_size"] for f in user_files[user_id])
         password = user_states.get(f"{user_id}_password", "بدون رمز")
         
@@ -669,22 +711,17 @@ async def process_zip(client, message: Message):
         keyboard = InlineKeyboardMarkup(buttons)
         
         # ارسال پیام با دکمه‌ها
-        summary_message = await safe_send_message(
-            message.chat.id,
-            f"📦 خلاصه درخواست زیپ\n\n"
-            f"📝 نام فایل: {zip_name}.zip\n"
-            f"🔑 رمز: {password}\n"
-            f"📊 تعداد فایل‌ها: {total_files}\n"
-            f"💾 حجم کل: {format_size(total_size)}\n\n"
-            f"⚠️ توجه: این عملیات ممکن است زمان بر باشد\n"
+        await message.reply(
+            f"📦 **خلاصه درخواست زیپ**\n\n"
+            f"📝 نام فایل: `{zip_name}.zip`\n"
+            f"🔑 رمز: `{password}`\n"
+            f"📊 تعداد فایل‌ها: `{total_files}`\n"
+            f"💾 حجم کل: `{format_size(total_size)}`\n\n"
+            f"⚠️ این عملیات ممکن است زمان بر باشد\n"
             f"📌 برای شروع روی دکمه زیر کلیک کنید",
-            reply_to_message_id=message.id,
-            reply_markup=keyboard
+            reply_markup=keyboard,
+            parse_mode=enums.ParseMode.MARKDOWN
         )
-        
-        # ذخیره ID پیام برای استفاده بعدی
-        if summary_message:
-            user_states[f"{user_id}_summary_msg_id"] = summary_message.id
 
 async def handle_callback_query(client, callback_query):
     user_id = callback_query.from_user.id
