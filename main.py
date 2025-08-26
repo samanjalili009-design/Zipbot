@@ -564,19 +564,30 @@ async def start_zip(client, message: Message):
     
     user_states[user_id] = "waiting_password"
     
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🚫 بدون رمز", callback_data="no_password")],
-        [InlineKeyboardButton("❌ لغو", callback_data="cancel_zip")]
-    ])
-    
     await safe_send_message(
         message.chat.id,
         "🔐 لطفاً رمز عبور برای فایل زیپ وارد کنید:\n\n"
-        "📝 می‌توانید از دکمه زیر برای بدون رمز استفاده کنید\n"
+        "📝 پس از وارد کردن رمز، از /done استفاده کنید\n"
         "⚠️ توجه: رمز عبور باید حداقل 4 کاراکتر باشد",
-        reply_to_message_id=message.id,
-        reply_markup=keyboard
+        reply_to_message_id=message.id
     )
+
+async def start_zip_now(client, message: Message):
+    user_id = message.from_user.id
+    
+    if not is_user_allowed(user_id):
+        return
+    
+    if user_states.get(user_id) != "ready_to_zip":
+        await message.reply("❌ ابتدا باید مراحل قبلی را کامل کنید")
+        return
+    
+    zip_name = user_states.get(f"{user_id}_zipname", f"archive_{int(time.time())}")
+    
+    # اضافه کردن به صف پردازش
+    add_to_queue(process_zip_files, user_id, zip_name, message.chat.id, message.id)
+    
+    await message.reply("✅ درخواست زیپ به صف اضافه شد. عملیات به زودی شروع می‌شود...")
 
 async def cancel_zip(client, message: Message):
     user_id = message.from_user.id
@@ -603,68 +614,6 @@ async def process_zip(client, message: Message):
     if user_id not in user_states:
         return
     
-    if user_states.get(user_id) == "waiting_password":
-        zip_password = message.text.strip()
-        
-        if not zip_password:
-            await safe_send_message(
-                message.chat.id,
-                "❌ رمز عبور نمی‌تواند خالی باشد\n\n"
-                "📝 لطفاً یک رمز عبور معتبر وارد کنید",
-                reply_to_message_id=message.id
-            )
-            return
-        
-        if len(zip_password) < 4:
-            await safe_send_message(
-                message.chat.id,
-                "❌ رمز عبور باید حداقل 4 کاراکتر باشد\n\n"
-                "📝 لطفاً یک رمز قوی‌تر انتخاب کنید",
-                reply_to_message_id=message.id
-            )
-            return
-        
-        user_states[user_id] = "waiting_filename"
-        user_states[f"{user_id}_password"] = zip_password
-        
-        # پیشنهاد نام فایل بر اساس تاریخ و زمان
-        suggested_name = f"archive_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        
-        await safe_send_message(
-            message.chat.id,
-            f"📝 حالا نام فایل زیپ نهایی را وارد کنید\n\n"
-            f"💡 پیشنهاد: {suggested_name}\n"
-            f"⚠️ توجه: پسوند .zip اضافه خواهد شد",
-            reply_to_message_id=message.id
-        )
-        return
-    
-    if user_states.get(user_id) == "waiting_filename":
-        zip_name = message.text.strip()
-        if not zip_name:
-            await safe_send_message(
-                message.chat.id,
-                "❌ نام فایل نمی‌تواند خالی باشد",
-                reply_to_message_id=message.id
-            )
-            return
-        
-        # حذف کاراکترهای غیرمجاز از نام فایل
-        import re
-        zip_name = re.sub(r'[<>:"/\\|?*]', '_', zip_name)
-        zip_name = zip_name[:50]  # محدودیت طول نام
-        
-        user_states[f"{user_id}_zipname"] = zip_name
-        
-        # نمایش خلاصه و تایید نهایی
-        total_files = len(user_files[user_id])
-
-async def process_zip(client, message: Message):
-    user_id = message.from_user.id
-    
-    if user_id not in user_states:
-        return
-    
     # حالت انتظار برای رمز
     if user_states.get(user_id) == "waiting_password":
         zip_password = message.text.strip()
@@ -681,7 +630,7 @@ async def process_zip(client, message: Message):
         user_states[f"{user_id}_password"] = zip_password
         
         suggested_name = f"archive_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        await message.reply(f"📝 نام فایل زیپ را وارد کنید:\n💡 پیشنهاد: {suggested_name}")
+        await message.reply(f"📝 نام فایل زیپ را وارد کنید:\n💡 پیشنهاد: {suggested_name}\n\n✅ پس از وارد کردن نام، از /done استفاده کنید")
         return
     
     # حالت انتظار برای نام فایل
@@ -697,31 +646,41 @@ async def process_zip(client, message: Message):
         zip_name = zip_name[:50]
         
         user_states[f"{user_id}_zipname"] = zip_name
+        user_states[user_id] = "ready_to_zip"
         
         # محاسبه اطلاعات
         total_files = len(user_files[user_id])
         total_size = sum(f["file_size"] for f in user_files[user_id])
         password = user_states.get(f"{user_id}_password", "بدون رمز")
         
-        # ایجاد دکمه‌ها
-        buttons = [
-            [InlineKeyboardButton("✅ شروع زیپ", callback_data="confirm_zip")],
-            [InlineKeyboardButton("❌ لغو", callback_data="cancel_zip")]
-        ]
-        keyboard = InlineKeyboardMarkup(buttons)
-        
-        # ارسال پیام با دکمه‌ها
         await message.reply(
             f"📦 **خلاصه درخواست زیپ**\n\n"
             f"📝 نام فایل: `{zip_name}.zip`\n"
             f"🔑 رمز: `{password}`\n"
             f"📊 تعداد فایل‌ها: `{total_files}`\n"
             f"💾 حجم کل: `{format_size(total_size)}`\n\n"
-            f"⚠️ این عملیات ممکن است زمان بر باشد\n"
-            f"📌 برای شروع روی دکمه زیر کلیک کنید",
-            reply_markup=keyboard,
+            f"✅ برای شروع فرآیند زیپ از دستور /zipnow استفاده کنید\n"
+            f"❌ برای لغو از /cancel استفاده کنید",
             parse_mode=enums.ParseMode.MARKDOWN
         )
+
+async def handle_done_command(client, message: Message):
+    """هندلر برای دستور /done"""
+    user_id = message.from_user.id
+    
+    if user_id not in user_states:
+        await message.reply("❌ هیچ فرآیندی در حال انجام نیست")
+        return
+    
+    if user_states.get(user_id) == "waiting_password":
+        await message.reply("❌ لطفاً ابتدا رمز عبور را وارد کنید")
+        return
+    
+    if user_states.get(user_id) == "waiting_filename":
+        await message.reply("❌ لطفاً ابتدا نام فایل را وارد کنید")
+        return
+    
+    await message.reply("✅ دستور /done دریافت شد")
 
 async def handle_callback_query(client, callback_query):
     user_id = callback_query.from_user.id
@@ -1018,6 +977,8 @@ async def run_bot():
     app.on_message(filters.command("start"))(start)
     app.on_message(filters.document | filters.video | filters.audio)(handle_file)
     app.on_message(filters.command("zip"))(start_zip)
+    app.on_message(filters.command("zipnow"))(start_zip_now)
+    app.on_message(filters.command("done"))(handle_done_command)
     app.on_message(filters.command("cancel"))(cancel_zip)
     app.on_message(filters.text & non_command)(process_zip)
     app.on_callback_query()(handle_callback_query)
