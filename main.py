@@ -187,17 +187,6 @@ def add_to_queue(task_func: Callable, *args, **kwargs):
     """اضافه کردن تسک به صف"""
     task_queue.append((task_func, args, kwargs))
 
-async def create_zip_part(zip_path, files, password):
-    """ایجاد یک پارت زیپ"""
-    with pyzipper.AESZipFile(zip_path, "w", 
-                           compression=pyzipper.ZIP_DEFLATED, 
-                           encryption=pyzipper.WZ_AES) as zipf:
-        if password:
-            zipf.setpassword(password.encode())
-        
-        for file_info in files:
-            zipf.write(file_info['path'], file_info['name'])
-
 async def upload_zip_part(zip_path, part_number, total_parts, chat_id, message_id, password, processing_msg):
     """آپلود یک پارت زیپ"""
     try:
@@ -215,7 +204,8 @@ async def upload_zip_part(zip_path, part_number, total_parts, chat_id, message_i
             caption=(
                 f"📦 پارت {part_number + 1}/{total_parts}\n"
                 f"🔑 رمز: `{password}`\n"
-                f"💾 حجم: {part_size // 1024 // 1024}MB"
+                f"💾 حجم: {part_size // 1024 // 1024}MB\n"
+                f"💡 برای extract: همه پارت‌ها رو دانلود کرده و با WinRAR/7Zip باز کنید"
             ),
             progress=progress_bar,
             progress_args=(processing_msg, start_time, f"آپلود پارت {part_number + 1}"),
@@ -372,16 +362,16 @@ async def process_zip(client, message):
         add_to_queue(process_zip_files, user_id, zip_name, message.chat.id, message.id)
 
 async def process_zip_files(user_id, zip_name, chat_id, message_id):
-    """پردازش هوشمندانه فایل‌ها با زیپ و آپلود تدریجی"""
+    """پردازش هوشمندانه فایل‌ها با ادغام واقعی و تقسیم به پارت‌ها"""
     try:
         processing_msg = await app.send_message(chat_id, "⏳ در حال ایجاد فایل زیپ...")
         zip_password = user_states.get(f"{user_id}_password")
         
         with tempfile.TemporaryDirectory() as tmp_dir:
             total_files = len(user_files[user_id])
-            file_info_list = []
+            all_files = []
             
-            # دانلود همه فایل‌ها و جمع‌آوری اطلاعات
+            # دانلود همه فایل‌ها
             for i, finfo in enumerate(user_files[user_id], 1):
                 file_msg = finfo["message"]
                 file_name = finfo["file_name"]
@@ -396,78 +386,79 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
                 )
                 
                 if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
-                    file_size = os.path.getsize(file_path)
-                    file_info_list.append({
-                        'path': file_path,
-                        'name': file_name,
-                        'size': file_size
-                    })
+                    all_files.append((file_path, file_name))
                 
                 await asyncio.sleep(2)
             
-            # مرتب کردن فایل‌ها بر اساس حجم (بزرگ به کوچک)
-            file_info_list.sort(key=lambda x: x['size'], reverse=True)
+            # ایجاد یک زیپ بزرگ از همه فایل‌ها
+            master_zip_path = os.path.join(tmp_dir, f"{zip_name}_master.zip")
             
-            # ایجاد پارت‌ها به صورت هوشمند
-            parts = []
-            current_part = []
-            current_size = 0
+            await processing_msg.edit_text("📦 در حال ایجاد فایل زیپ اصلی...")
             
-            for file_info in file_info_list:
-                # اگر فایل از 500MB بزرگتر است،独自 یک پارت شود
-                if file_info['size'] > PART_SIZE:
-                    if current_part:  # پارت فعلی را ذخیره کن
-                        parts.append(current_part)
-                        current_part = []
-                        current_size = 0
-                    parts.append([file_info])  # فایل بزرگ独自 یک پارت
-                else:
-                    # اگر اضافه کردن این فایل باعث превыظرفیت شود
-                    if current_size + file_info['size'] > PART_SIZE:
-                        if current_part:  # پارت فعلی را ذخیره کن
-                            parts.append(current_part)
-                            current_part = []
-                            current_size = 0
+            # ایجاد زیپ اصلی با همه فایل‌ها
+            with pyzipper.AESZipFile(master_zip_path, "w", 
+                                   compression=pyzipper.ZIP_DEFLATED, 
+                                   encryption=pyzipper.WZ_AES) as zipf:
+                if zip_password:
+                    zipf.setpassword(zip_password.encode())
+                
+                for file_path, file_name in all_files:
+                    zipf.write(file_path, file_name)
+            
+            # تقسیم زیپ بزرگ به پارت‌های 500MB
+            master_zip_size = os.path.getsize(master_zip_path)
+            num_parts = math.ceil(master_zip_size / PART_SIZE)
+            
+            await processing_msg.edit_text(f"✂️ در حال تقسیم به {num_parts} پارت...")
+            
+            # تقسیم فایل زیپ به پارت‌ها
+            part_number = 1
+            with open(master_zip_path, 'rb') as master_file:
+                while True:
+                    part_data = master_file.read(PART_SIZE)
+                    if not part_data:
+                        break
                     
-                    current_part.append(file_info)
-                    current_size += file_info['size']
-            
-            # اضافه کردن پارت آخر اگر وجود دارد
-            if current_part:
-                parts.append(current_part)
-            
-            num_parts = len(parts)
-            await processing_msg.edit_text(f"📦 در حال ایجاد {num_parts} پارت زیپ...")
-            
-            # ایجاد و آپلود هر پارت
-            for part_index, part_files in enumerate(parts):
-                part_number = part_index + 1
-                zip_path = os.path.join(tmp_dir, f"{zip_name}_part{part_number}.zip")
-                
-                # ایجاد زیپ برای این پارت
-                await create_zip_part(zip_path, part_files, zip_password)
-                
-                # آپلود پارت
-                await upload_zip_part(
-                    zip_path, 
-                    part_index, 
-                    num_parts, 
-                    chat_id, 
-                    message_id, 
-                    zip_password,
-                    processing_msg
-                )
-                
-                # حذف فایل‌های موقت این پارت
-                for file_info in part_files:
+                    part_path = os.path.join(tmp_dir, f"{zip_name}_part{part_number:03d}.zip")
+                    
+                    with open(part_path, 'wb') as part_file:
+                        part_file.write(part_data)
+                    
+                    # آپلود پارت
+                    await upload_zip_part(
+                        part_path, 
+                        part_number - 1, 
+                        num_parts, 
+                        chat_id, 
+                        message_id, 
+                        zip_password,
+                        processing_msg
+                    )
+                    
+                    # حذف فایل موقت پارت
                     try:
-                        os.remove(file_info['path'])
+                        os.remove(part_path)
                     except:
                         pass
+                    
+                    part_number += 1
+            
+            # حذف فایل‌های موقت
+            for file_path, file_name in all_files:
+                try:
+                    os.remove(file_path)
+                except:
+                    pass
+            try:
+                os.remove(master_zip_path)
+            except:
+                pass
             
             await safe_send_message(
                 chat_id,
-                f"✅ تمامی {num_parts} پارت زیپ آماده شد!\n🔑 رمز: `{zip_password}`",
+                f"✅ تمامی {num_parts} پارت زیپ آماده شد!\n🔑 رمز: `{zip_password}`\n"
+                f"💡 برای extract کردن: همه پارت‌ها رو دانلود کرده و با WinRAR/7Zip باز کنید\n"
+                f"📦 حجم کل: {master_zip_size//1024//1024}MB",
                 reply_to_message_id=message_id
             )
             
