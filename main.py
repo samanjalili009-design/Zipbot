@@ -661,12 +661,15 @@ async def process_zip(client, message: Message):
         total_size = sum(f["file_size"] for f in user_files[user_id])
         password = user_states.get(f"{user_id}_password", "بدون رمز")
         
-        keyboard = InlineKeyboardMarkup([
+        # ایجاد دکمه‌ها
+        buttons = [
             [InlineKeyboardButton("✅ شروع زیپ", callback_data="confirm_zip")],
             [InlineKeyboardButton("❌ لغو", callback_data="cancel_zip")]
-        ])
+        ]
+        keyboard = InlineKeyboardMarkup(buttons)
         
-        await safe_send_message(
+        # ارسال پیام با دکمه‌ها
+        summary_message = await safe_send_message(
             message.chat.id,
             f"📦 خلاصه درخواست زیپ\n\n"
             f"📝 نام فایل: {zip_name}.zip\n"
@@ -678,6 +681,10 @@ async def process_zip(client, message: Message):
             reply_to_message_id=message.id,
             reply_markup=keyboard
         )
+        
+        # ذخیره ID پیام برای استفاده بعدی
+        if summary_message:
+            user_states[f"{user_id}_summary_msg_id"] = summary_message.id
 
 async def handle_callback_query(client, callback_query):
     user_id = callback_query.from_user.id
