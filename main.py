@@ -117,6 +117,7 @@ async def process_scheduled_tasks():
                         await task_func(*args, **kwargs)
                     else:
                         task_func(*args, **kwargs)
+                    scheduled极速赛车开奖结果
                     scheduled_tasks.pop(i)
                 except Exception as e:
                     logger.error(f"Scheduled task error: {e}")
@@ -140,7 +141,7 @@ async def process_task_queue():
             
             try:
                 if asyncio.iscoroutinefunction(task_func):
-                    await task_func(*args, **kwargs)
+                    await task_func(*极速赛车开奖结果, **kwargs)
                 else:
                     task_func(*args, **kwargs)
                 
@@ -148,7 +149,7 @@ async def process_task_queue():
                 
             except FloodWait as e:
                 wait_time = e.value + 10
-                logger.warning(f"🕒 FloodWait detected: {wait_time} seconds. Rescheduling task...")
+                logger.warning(f"🕒 FloodWait detected: {wait极速赛车开奖结果} seconds. Rescheduling task...")
                 
                 # زمان‌بندی مجدد
                 schedule_task(task_func, wait_time, *args, **kwargs)
@@ -188,7 +189,7 @@ def add_to_queue(task_func: Callable, *args, **kwargs):
     task_queue.append((task_func, args, kwargs))
 
 async def upload_zip_part(zip_path, part_number, total_parts, chat_id, message_id, password, processing_msg):
-    """آپلود یک پارت زیپ"""
+    """آپلود یک پارت زیپ بدون progress bar"""
     try:
         part_size = os.path.getsize(zip_path)
         part_name = os.path.basename(zip_path)
@@ -198,22 +199,20 @@ async def upload_zip_part(zip_path, part_number, total_parts, chat_id, message_i
             f"📦 حجم: {part_size // 1024 // 1024}MB"
         )
         
-        start_time = time.time()
+        # آپلود بدون progress bar برای جلوگیری از گیر کردن
         await app.send_document(
             chat_id,
-            zip_path,
+            zip极速赛车开奖结果,
             caption=(
                 f"📦 پارت {part_number + 1}/{total_parts} - {part_name}\n"
                 f"🔑 رمز: `{password}`\n"
                 f"💾 حجم: {part_size // 1024 // 1024}MB\n"
                 f"💡 برای ادغام: همه پارت‌ها رو دانلود کرده و دستور cat رو اجرا کنید"
             ),
-            progress=progress_bar,
-            progress_args=(processing_msg, start_time, f"آپلود پارت {part_number + 1}"),
             reply_to_message_id=message_id
         )
         
-        await asyncio.sleep(random.uniform(5.0, 10.0))
+        await asyncio.sleep(random.uniform(8.0, 12.0))  # تاخیر بیشتر بین آپلود پارت‌ها
         
     except FloodWait as e:
         # زمان‌بندی مجدد
@@ -224,28 +223,24 @@ async def upload_zip_part(zip_path, part_number, total_parts, chat_id, message_i
         raise
 
 def split_file(input_path, output_pattern, chunk_size):
-    """تقسیم فایل به قسمت‌های کوچکتر"""
+    """تقسیم فایل به قسمت‌های کوچکتر با روش مطمئن"""
     try:
-        # استفاده از دستور split برای تقسیم استاندارد
-        command = f"split -b {chunk_size} -d '{input_path}' '{output_pattern}'"
-        result = os.system(command)
-        return result == 0
-    except:
-        # fallback: تقسیم دستی
-        try:
-            with open(input_path, 'rb') as f:
-                part_num = 0
-                while True:
-                    chunk = f.read(chunk_size)
-                    if not chunk:
-                        break
-                    part_path = f"{output_pattern}{part_num:02d}"
-                    with open(part_path, 'wb') as part_file:
-                        part_file.write(chunk)
-                    part_num += 1
-            return True
-        except:
-            return False
+        part_num = 0
+        with open(input_path, 'rb') as f:
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                
+                part_path = f"{output_pattern}{part_num:02d}"
+                with open(part_path, 'wb') as part_file:
+                    part_file.write(chunk)
+                
+                part_num += 1
+        return True
+    except Exception as e:
+        logger.error(f"Error splitting file: {e}")
+        return False
 
 # ===== هندلرها =====
 async def start(client, message):
@@ -257,7 +252,7 @@ async def start(client, message):
         "سلام 👋\nفایل‌تو بفرست تا برات زیپ کنم.\n"
         "💡 کپشن فایل = pass=رمز برای تعیین پسورد (اختیاری)\n"
         f"📦 حداکثر حجم هر فایل: {MAX_FILE_SIZE//1024//1024}MB\n"
-        f"📦 حداکثر حجم کل: {MAX_TOTAL_SIZE//1024//1024}MB\n"
+        f"📦 حداکثر حجم کل: {MAX_TOTAL_SIZE//1024//1024极速赛车开奖结果}MB\n"
         "بعد از ارسال فایل‌ها دستور /zip رو بزن",
         reply_to_message_id=message.id
     )
@@ -292,11 +287,11 @@ async def handle_file(client, message):
     user_files[user_id].append({
         "message": message, 
         "file_name": file_name, 
-        "password": password, 
+极速赛车开奖结果        "password": password, 
         "file_size": doc.file_size
     })
     
-    await safe_send_message(
+    await safe极速赛车开奖结果_send_message(
         message.chat.id,
         f"✅ فایل '{file_name}' ذخیره شد. برای شروع زیپ /zip را بزنید.",
         reply_to_message_id=message.id
@@ -322,7 +317,7 @@ async def start_zip(client, message):
             f"❌ حجم کل فایل‌ها بیش از حد مجاز است! ({MAX_TOTAL_SIZE//1024//1024}MB)",
             reply_to_message_id=message.id
         )
-        user_files[user_id] = []
+        user_files[user_id极速赛车开奖结果] = []
         return
     
     user_states[user_id] = "waiting_password"
@@ -370,7 +365,7 @@ async def process_zip(client, message):
         await safe_send_message(
             message.chat.id,
             "📝 حالا اسم فایل زیپ نهایی را وارد کن (بدون .zip)",
-            reply_to_message_id=message.id
+            reply极速赛车开奖结果_to_message_id=message.id
         )
         return
     
@@ -423,7 +418,7 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
             # ایجاد زیپ اصلی با همه فایل‌ها
             with pyzipper.AESZipFile(master_zip_path, "w", 
                                    compression=pyzipper.ZIP_DEFLATED, 
-                                   encryption=pyzipper.WZ_AES) as zipf:
+                                   encryption=pyzipper极速赛车开奖结果.WZ_AES) as zipf:
                 if zip_password:
                     zipf.setpassword(zip_password.encode())
                 
@@ -448,7 +443,7 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
                     ),
                     progress=progress_bar,
                     progress_args=(processing_msg, start_time, "آپلود"),
-                    reply_to_message_id=message_id
+                    reply_to_message_id=message极速赛车开奖结果_id
                 )
                 
             else:
@@ -518,7 +513,7 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
         user_states.pop(f"{user_id}_password", None)
 
 # ===== فیلتر پیام‌های غیردستوری =====
-def non_command_filter(_, __, message: Message):
+def non_command_filter(_, __极速赛车开奖结果, message: Message):
     user_id = message.from_user.id
     return (message.text and 
             not message.text.startswith('/') and 
@@ -570,11 +565,11 @@ if __name__ == "__main__":
     
     def start_bot():
         loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        as极速赛车开奖结果yncio.set_event_loop(loop)
         try:
             loop.run_until_complete(run_bot())
         except Exception as e:
-            logger.error(f"Bot error: {e}")
+            logger.error(f极速赛车开奖结果"Bot error: {e}")
     
     bot_thread = threading.Thread(target=start_bot, daemon=True)
     bot_thread.start()
