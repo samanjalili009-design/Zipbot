@@ -385,7 +385,7 @@ async def create_zip_part_advanced(zip_path: str, files: List[Dict], password: O
                         "w", 
                         compression=pyzipper.ZIP_DEFLATED,
                         compresslevel=Config.ZIP_COMPRESSION_LEVEL,
-                        encryption=pyzipper.WZ_AES,
+                        encryption=pyzipper.WZ_AES if password else None,
                         allowZip64=True  # فعال سازی پشتیبانی از فایل‌های بزرگ
                     ) as zipf:
                         if password:
@@ -589,7 +589,10 @@ async def cleanup_files(file_paths: List[str]):
     for file_path in file_paths:
         try:
             if os.path.exists(file_path):
-                os.remove(file_path)
+                if os.path.isdir(file_path):
+                    shutil.rmtree(file_path)
+                else:
+                    os.remove(file_path)
                 logger.info(f"Cleaned up file: {file_path}")
         except Exception as e:
             logger.error(f"Error cleaning up file {file_path}: {e}")
@@ -662,7 +665,7 @@ async def handle_file(client, message: Message):
     if file_size > Config.MAX_FILE_SIZE:
         await safe_send_message(
             message.chat.id,
-            f"❌ **ح حجم فایل بیش از حد مجاز است!**\n\n"
+            f"❌ **حجم فایل بیش از حد مجاز است!**\n\n"
             f"📦 حجم فایل: {progress_tracker.format_size(file_size)}\n"
             f"⚖️ حد مجاز: {progress_tracker.format_size(Config.MAX_FILE_SIZE)}",
             reply_to_message_id=message.id
@@ -908,6 +911,15 @@ async def handle_callback_query(client, callback_query):
     
     await callback_query.message.delete()
 
+def non_command_filter(_, __, message: Message):
+    user_id = message.from_user.id
+    return (message.text and 
+            not message.text.startswith('/') and 
+            user_id in user_states and
+            user_states.get(user_id) in ["waiting_password", "waiting_filename"])
+
+non_command = filters.create(non_command_filter)
+
 async def process_zip_files(user_id, zip_name, chat_id, message_id):
     processing_msg = None
     temp_files_to_cleanup = []
@@ -1090,15 +1102,6 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
         user_states.pop(f"{user_id}_password", None)
         user_states.pop(f"{user_id}_zipname", None)
         save_user_data()
-
-def non_command_filter(_, __, message: Message):
-    user_id = message.from_user.id
-    return (message.text and 
-            not message.text.startswith('/') and 
-            user_id in user_states and
-            user_states.get(user_id) in ["waiting_password", "waiting_filename"])
-
-non_command = filters.create(non_command_filter)
 
 async def run_bot():
     global app
