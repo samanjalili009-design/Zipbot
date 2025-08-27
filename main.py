@@ -29,12 +29,12 @@ class Config:
     MAX_FILE_SIZE = 4194304000  # 4GB
     MAX_TOTAL_SIZE = 8388608000  # 8GB
     PART_SIZE = 1900 * 1024 * 1024  # 1900MB
-    MAX_CONCURRENT_DOWNLOADS = 6  # دانلود همزمان
-    MAX_CONCURRENT_UPLOADS = 4  # آپلود همزمان
-    RETRY_DELAY = 2  # کاهش تاخیر
-    PROGRESS_UPDATE_INTERVAL = 0.5  # بروزرسانی هر 0.5 ثانیه
+    CHUNK_SIZE = 4 * 1024 * 1024  # 4MB
+    MAX_CONCURRENT_DOWNLOADS = 2
+    MAX_CONCURRENT_UPLOADS = 1
+    RETRY_DELAY = 10
+    PROGRESS_UPDATE_INTERVAL = 1  # بروزرسانی هر 1 ثانیه
     DATA_FILE = "user_data.json"
-    MAX_RETRIES = 5  # تلاش مجدد
 
 # ===== لاگ پیشرفته =====
 logging.basicConfig(
@@ -106,18 +106,13 @@ def format_time(seconds: int) -> str:
 def get_progress_bar(percentage: float, length: int = 20) -> str:
     filled = int(length * percentage / 100)
     bar = "█" * filled + "░" * (length - filled)
-    return f"{bar}"
-
-def get_animated_progress(percentage: float) -> str:
-    animations = ["🟦", "⬜", "🔷", "🔶", "🟩", "🟥"]
-    filled = int(percentage / 10)
-    return animations[0] * filled + animations[1] * (10 - filled)
+    return f"{bar} {percentage:.1f}%"
 
 async def safe_send_message(chat_id, text, reply_to_message_id=None, reply_markup=None, parse_mode=None):
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            await asyncio.sleep(random.uniform(0.1, 0.5))
+            await asyncio.sleep(random.uniform(1.0, 3.0))
             return await app.send_message(
                 chat_id, 
                 text, 
@@ -126,12 +121,12 @@ async def safe_send_message(chat_id, text, reply_to_message_id=None, reply_marku
                 parse_mode=parse_mode
             )
         except FloodWait as e:
-            wait_time = e.value + random.uniform(0.5, 2)
+            wait_time = e.value + random.uniform(2, 5)
             logger.warning(f"FloodWait: {wait_time} seconds (attempt {attempt + 1}/{max_retries})")
             await asyncio.sleep(wait_time)
         except Exception as e:
             logger.error(f"Error sending message (attempt {attempt + 1}): {e}")
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(2)
     
     try:
         return await app.send_message(
@@ -150,70 +145,38 @@ class ProgressTracker:
         self.last_update = 0
         self.last_text = ""
         self.last_percent = 0
-        self.last_speed = 0
-        self.speed_history = deque(maxlen=10)
-        self.last_bytes = 0
-        self.last_time = time.time()
 
 progress_tracker = ProgressTracker()
 
 async def progress_callback(current, total, message: Message, stage: str, file_name: str = ""):
     try:
         now = time.time()
-        elapsed = now - progress_tracker.start_time
-        
-        # محاسبه سرعت لحظه‌ای
-        time_diff = now - progress_tracker.last_time
-        bytes_diff = current - progress_tracker.last_bytes
-        
-        if time_diff > 0:
-            instant_speed = bytes_diff / time_diff
-        else:
-            instant_speed = 0
-        
-        # به‌روزرسانی آخرین مقادیر
-        progress_tracker.last_bytes = current
-        progress_tracker.last_time = now
-        
-        # محاسبه سرعت متوسط
-        current_speed = current / elapsed if elapsed > 0 else 0
-        progress_tracker.speed_history.append(instant_speed)
-        
-        # میانگین سرعت از تاریخچه
-        avg_speed = sum(progress_tracker.speed_history) / len(progress_tracker.speed_history) if progress_tracker.speed_history else current_speed
-        
-        percent = (current / total) * 100
-        eta = (total - current) / avg_speed if avg_speed > 0 else 0
-        
-        # بروزرسانی هر 0.5 ثانیه یا اگر تغییر قابل توجهی وجود داشت
-        if now - progress_tracker.last_update < Config.PROGRESS_UPDATE_INTERVAL and abs(percent - progress_tracker.last_percent) < 2:
+        if now - progress_tracker.last_update < Config.PROGRESS_UPDATE_INTERVAL:
             return
         
         progress_tracker.last_update = now
+        
+        percent = (current / total) * 100
+        elapsed = now - progress_tracker.start_time
+        speed = current / elapsed if elapsed > 0 else 0
+        eta = (total - current) / speed if speed > 0 else 0
+        
+        # فقط اگر تغییر قابل توجهی وجود داشت آپدیت کنیم
+        if abs(percent - progress_tracker.last_percent) < 1 and current != total:
+            return
+        
         progress_tracker.last_percent = percent
         
         bar = get_progress_bar(percent)
-        animated_bar = get_animated_progress(percent)
-        
-        # انتخاب ایموجی بر اساس سرعت
-        speed_emoji = "🐌"  # کند
-        if instant_speed > 1024 * 1024:  # بیش از 1MB/s
-            speed_emoji = "🚀"  # بسیار سریع
-        elif instant_speed > 512 * 1024:  # بیش از 512KB/s
-            speed_emoji = "⚡"  # سریع
-        elif instant_speed > 256 * 1024:  # بیش از 256KB/s
-            speed_emoji = "🐎"  # متوسط
         
         progress_text = (
-            f"**{stage}**\n\n"
-            f"{bar}\n"
-            f"**{percent:.1f}%** {animated_bar}\n\n"
-            f"📁 **فایل:** `{file_name[:20]}{'...' if len(file_name) > 20 else ''}`\n"
-            f"📊 **حجم:** `{format_size(current)} / {format_size(total)}`\n"
-            f"{speed_emoji} **سرعت لحظه‌ای:** `{format_size(int(instant_speed))}/s`\n"
-            f"📈 **سرعت متوسط:** `{format_size(int(avg_speed))}/s`\n"
-            f"⏰ **زمان باقیمانده:** `{format_time(int(eta))}`\n"
-            f"🕐 **زمان سپری شده:** `{format_time(int(elapsed))}`"
+            f"🚀 **{stage}**\n\n"
+            f"{bar}\n\n"
+            f"📁 فایل: `{file_name[:30]}{'...' if len(file_name) > 30 else ''}`\n"
+            f"📊 پیشرفت: `{format_size(current)} / {format_size(total)}`\n"
+            f"⚡ سرعت: `{format_size(speed)}/s`\n"
+            f"⏰ زمان باقیمانده: `{format_time(int(eta))}`\n"
+            f"🕐 زمان سپری شده: `{format_time(int(elapsed))}`"
         )
         
         if progress_tracker.last_text != progress_text:
@@ -227,27 +190,23 @@ async def progress_callback(current, total, message: Message, stage: str, file_n
         logger.error(f"Progress callback error: {e}")
 
 async def safe_download_media(message, file_path, progress_callback=None, file_name=""):
-    max_retries = Config.MAX_RETRIES
+    max_retries = 3
     for attempt in range(max_retries):
         try:
             async with download_semaphore:
-                await asyncio.sleep(random.uniform(0.1, 0.3))
+                await asyncio.sleep(random.uniform(1.0, 3.0))
                 
                 os.makedirs(os.path.dirname(file_path), exist_ok=True)
                 
                 progress_tracker.start_time = time.time()
                 progress_tracker.last_update = 0
                 progress_tracker.last_percent = 0
-                progress_tracker.speed_history.clear()
-                progress_tracker.last_bytes = 0
-                progress_tracker.last_time = time.time()
                 
-                # دانلود بدون chunk_size (حذف پارامتر مشکل‌ساز)
                 await app.download_media(
                     message,
                     file_name=file_path,
                     progress=progress_callback,
-                    progress_args=(message, "📥 دانلود", file_name)
+                    progress_args=(message, "دانلود", file_name)
                 )
                 
                 if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
@@ -256,7 +215,7 @@ async def safe_download_media(message, file_path, progress_callback=None, file_n
                     logger.warning(f"Downloaded file is empty or missing (attempt {attempt + 1})")
                     
         except FloodWait as e:
-            wait_time = e.value + random.uniform(1, 3)
+            wait_time = e.value + random.uniform(5, 10)
             logger.warning(f"Download FloodWait: {wait_time} seconds (attempt {attempt + 1})")
             await asyncio.sleep(wait_time)
         except (RPCError, aiohttp.ClientError, OSError) as e:
@@ -300,14 +259,14 @@ async def process_scheduled_tasks():
             except Exception as e:
                 logger.error(f"Scheduled task error: {e}")
         
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(1)
 
 async def process_task_queue():
     global processing
     
     while True:
         if not task_queue:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1)
             continue
         
         processing = True
@@ -319,10 +278,10 @@ async def process_task_queue():
             else:
                 await asyncio.to_thread(task_func, *args, **kwargs)
             
-            await asyncio.sleep(random.uniform(1.0, 2.0))
+            await asyncio.sleep(random.uniform(2.0, 5.0))
             
         except FloodWait as e:
-            wait_time = e.value + random.uniform(5, 8)
+            wait_time = e.value + random.uniform(10, 15)
             logger.warning(f"🕒 FloodWait detected: {wait_time} seconds. Rescheduling task...")
             
             schedule_task(task_func, wait_time, *args, **kwargs)
@@ -331,11 +290,11 @@ async def process_task_queue():
             if user_id:
                 await notify_user_floodwait(user_id, wait_time)
             
-            await asyncio.sleep(2)
+            await asyncio.sleep(5)
             
         except Exception as e:
             logger.error(f"Task error: {e}")
-            await asyncio.sleep(2)
+            await asyncio.sleep(5)
         
         finally:
             processing = False
@@ -352,10 +311,9 @@ async def notify_user_floodwait(user_id: int, wait_time: int):
         
         await safe_send_message(
             user_id,
-            f"⏳ **محدودیت موقت تلگرام**\n\n"
+            f"⏳ به دلیل محدودیت موقت تلگرام، عملیات متوقف شد.\n"
             f"🕒 زمان انتظار: {wait_minutes} دقیقه و {wait_seconds} ثانیه\n"
-            f"✅ عملیات به طور خودکار ادامه خواهد یافت",
-            parse_mode=enums.ParseMode.MARKDOWN
+            f"✅ بعد از این زمان، عملیات به طور خودکار ادامه می‌یابد."
         )
     except Exception as e:
         logger.error(f"Error notifying user about floodwait: {e}")
@@ -364,11 +322,11 @@ async def create_zip_part(zip_path: str, files: List[Dict], password: Optional[s
     try:
         os.makedirs(os.path.dirname(zip_path), exist_ok=True)
         
-        # عدم استفاده از فشرده‌سازی برای افزایش سرعت
         with pyzipper.AESZipFile(
             zip_path, 
             "w", 
-            compression=pyzipper.ZIP_STORED,  # بدون فشرده‌سازی
+            compression=pyzipper.ZIP_DEFLATED,
+            compresslevel=6,
             encryption=pyzipper.WZ_AES
         ) as zipf:
             if password:
@@ -396,24 +354,20 @@ async def upload_zip_part(zip_path: str, part_number: int, total_parts: int,
             part_size = os.path.getsize(zip_path)
             
             await processing_msg.edit_text(
-                f"📤 **آپلود پارت {part_number + 1}/{total_parts}**\n\n"
+                f"📤 **در حال آپلود پارت {part_number + 1}/{total_parts}**\n\n"
                 f"📦 حجم: `{format_size(part_size)}`\n"
                 f"🔑 رمز: `{password}`\n"
-                f"⏳ در حال شروع...",
+                f"⏳ لطفاً منتظر بمانید...",
                 parse_mode=enums.ParseMode.MARKDOWN
             )
             
             progress_tracker.start_time = time.time()
             progress_tracker.last_update = 0
             progress_tracker.last_percent = 0
-            progress_tracker.speed_history.clear()
-            progress_tracker.last_bytes = 0
-            progress_tracker.last_time = time.time()
             
-            max_retries = Config.MAX_RETRIES
+            max_retries = 3
             for attempt in range(max_retries):
                 try:
-                    # آپلود بدون chunk_size
                     await app.send_document(
                         chat_id,
                         zip_path,
@@ -423,7 +377,7 @@ async def upload_zip_part(zip_path: str, part_number: int, total_parts: int,
                             f"💾 حجم: {format_size(part_size)}"
                         ),
                         progress=progress_callback,
-                        progress_args=(processing_msg, "📤 آپلود", f"پارت {part_number + 1}"),
+                        progress_args=(processing_msg, "آپلود", f"پارت {part_number + 1}"),
                         reply_to_message_id=message_id
                     )
                     break
@@ -431,7 +385,7 @@ async def upload_zip_part(zip_path: str, part_number: int, total_parts: int,
                 except FloodWait as e:
                     if attempt == max_retries - 1:
                         raise
-                    wait_time = e.value + random.uniform(2, 5)
+                    wait_time = e.value + random.uniform(5, 10)
                     logger.warning(f"Upload FloodWait: {wait_time} seconds (attempt {attempt + 1})")
                     await asyncio.sleep(wait_time)
                 except Exception as e:
@@ -440,11 +394,11 @@ async def upload_zip_part(zip_path: str, part_number: int, total_parts: int,
                     logger.error(f"Upload error (attempt {attempt + 1}): {e}")
                     await asyncio.sleep(Config.RETRY_DELAY)
             
-            await asyncio.sleep(random.uniform(1.0, 2.0))
+            await asyncio.sleep(random.uniform(3.0, 8.0))
             return True
             
     except FloodWait as e:
-        wait_time = e.value + random.uniform(6, 10)
+        wait_time = e.value + random.uniform(10, 15)
         schedule_task(
             upload_zip_part, 
             wait_time, 
@@ -467,9 +421,9 @@ async def start(client, message: Message):
         "✨ **قابلیت‌های ربات:**\n"
         "• 🔒 زیپ کردن فایل‌ها با رمزگذاری AES-256\n"
         "• 📦 تقسیم به پارت‌های خودکار زیر 2GB\n"
-        "• ⚡ دانلود و آپلود با حداکثر سرعت\n"
-        "• 📊 نمایش پیشرفت گرافیکی\n"
-        "• 🛡️ مدیریت محدودیت‌های تلگرام\n\n"
+        "• ⚡ دانلود و آپلود با قابلیت بازیابی\n"
+        "• 🛡️ مدیریت محدودیت‌های تلگرام\n"
+        "• 📊 نمایش پیشرفت حرفه‌ای\n\n"
         "📝 **روش استفاده:**\n"
         "1. فایل‌ها را ارسال کنید\n"
         "2. از کپشن `pass=رمز` برای رمز جداگانه هر فایل استفاده کنید\n"
@@ -528,8 +482,7 @@ async def handle_file(client, message: Message):
             f"❌ **حجم فایل بیش از حد مجاز است!**\n\n"
             f"📦 حجم فایل: {format_size(file_size)}\n"
             f"⚖️ حد مجاز: {format_size(Config.MAX_FILE_SIZE)}",
-            reply_to_message_id=message.id,
-            parse_mode=enums.ParseMode.MARKDOWN
+            reply_to_message_id=message.id
         )
         return
     
@@ -578,8 +531,7 @@ async def start_zip(client, message: Message):
             message.chat.id,
             "❌ **هیچ فایلی برای زیپ کردن وجود ندارد**\n\n"
             "📝 لطفاً ابتدا فایل‌ها را ارسال کنید",
-            reply_to_message_id=message.id,
-            parse_mode=enums.ParseMode.MARKDOWN
+            reply_to_message_id=message.id
         )
         return
     
@@ -591,8 +543,7 @@ async def start_zip(client, message: Message):
             f"📦 حجم کل: {format_size(total_size)}\n"
             f"⚖️ حد مجاز: {format_size(Config.MAX_TOTAL_SIZE)}\n\n"
             f"📌 لطفاً تعداد فایل‌ها را کاهش دهید",
-            reply_to_message_id=message.id,
-            parse_mode=enums.ParseMode.MARKDOWN
+            reply_to_message_id=message.id
         )
         user_files[user_id] = []
         save_user_data()
@@ -605,8 +556,7 @@ async def start_zip(client, message: Message):
         "🔐 **لطفاً رمز عبور برای فایل زیپ وارد کنید:**\n\n"
         "📝 پس از وارد کردن رمز، از /done استفاده کنید\n"
         "⚠️ توجه: رمز عبور باید حداقل 4 کاراکتر باشد",
-        reply_to_message_id=message.id,
-        parse_mode=enums.ParseMode.MARKDOWN
+        reply_to_message_id=message.id
     )
 
 async def start_zip_now(client, message: Message):
@@ -641,8 +591,7 @@ async def cancel_zip(client, message: Message):
         "❌ **عملیات لغو شد**\n\n"
         "✅ همه فایل‌های ذخیره شده پاک شدند\n"
         "📌 می‌توانید دوباره فایل‌ها را ارسال کنید",
-        reply_to_message_id=message.id,
-        parse_mode=enums.ParseMode.MARKDOWN
+        reply_to_message_id=message.id
     )
 
 async def process_zip(client, message: Message):
@@ -762,8 +711,7 @@ async def handle_callback_query(client, callback_query):
             user_id,
             f"📝 **حالا نام فایل زیپ نهایی را وارد کنید**\n\n"
             f"💡 پیشنهاد: {suggested_name}\n"
-            f"⚠️ توجه: پسوند .zip اضافه خواهد شد",
-            parse_mode=enums.ParseMode.MARKDOWN
+            f"⚠️ توجه: پسوند .zip اضافه خواهد شد"
         )
     
     elif data == "confirm_zip":
@@ -828,14 +776,14 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
                     else:
                         logger.error(f"Failed to download {file_name}")
                     
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(1)
                     
                 except Exception as e:
                     logger.error(f"Error processing file {finfo['file_name']}: {e}")
                     continue
             
             if not file_info_list:
-                await processing_msg.edit_text("❌ **هیچ فایلی با موفقیت دانلود نشد**\n\nلطفاً دوباره تلاش کنید", parse_mode=enums.ParseMode.MARKDOWN)
+                await processing_msg.edit_text("❌ **هیچ فایلی با موفقیت دانلود نشد**\n\nلطفاً دوباره تلاش کنید")
                 return
             
             await processing_msg.edit_text("📦 **در حال ایجاد پارت‌های زیپ...**\n\n⏳ لطفاً منتظر بمانید", parse_mode=enums.ParseMode.MARKDOWN)
@@ -920,7 +868,7 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
                 except:
                     pass
                 
-                await asyncio.sleep(1)
+                await asyncio.sleep(2)
             
             if successful_parts > 0:
                 result_text = (
@@ -986,15 +934,12 @@ async def run_bot():
     
     load_user_data()
     
-    # ایجاد کلاینت با تنظیمات بهینه
     app = Client(
         "user_bot",
         api_id=Config.API_ID,
         api_hash=Config.API_HASH,
         session_string=Config.SESSION_STRING,
-        in_memory=True,
-        workers=50,
-        sleep_threshold=60
+        in_memory=True
     )
     
     asyncio.create_task(process_scheduled_tasks())
@@ -1010,7 +955,7 @@ async def run_bot():
     app.on_callback_query()(handle_callback_query)
     
     await app.start()
-    logger.info("✅ Bot started successfully!")
+    logger.info("✅ Bot started successfully with advanced features!")
     
     async def periodic_save():
         while True:
