@@ -513,7 +513,7 @@ async def create_zip_part_advanced(zip_path: str, files: List[Dict], default_pas
                 else:
                     return False
             
-            # محاسبه timeout بر اساس حجم
+            # محاس� timeout بر اساس حجم
             total_size_mb = sum(f['size'] for f in files) / (1024 * 1024)
             dynamic_timeout = calculate_zip_timeout(total_size_mb)
             
@@ -590,14 +590,14 @@ async def upload_large_file(file_path: str, chat_id: int, caption: str, reply_to
                     logger.info(f"Upload retry {attempt + 1}/{max_retries} after {wait_time:.1f} seconds")
                     await asyncio.sleep(wait_time)
                 
+                # پارامتر chunk_size حذف شده زیرا در نسخه‌های جدید Pyrogram پشتیبانی نمی‌شود
                 await app.send_document(
                     chat_id=chat_id,
                     document=file_path,
                     caption=caption,
                     reply_to_message_id=reply_to_message_id,
                     progress=progress_callback,
-                    progress_args=progress_args,
-                    chunk_size=Config.UPLOAD_CHUNK_SIZE
+                    progress_args=progress_args
                 )
                 
                 logger.info(f"File uploaded successfully: {file_path}")
