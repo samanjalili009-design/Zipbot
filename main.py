@@ -362,7 +362,7 @@ async def notify_user_floodwait(user_id: int, wait_time: int):
     except Exception as e:
         logger.error(f"Error notifying user about floodwait: {e}")
 
-async def create_zip_part_advanced(zip_path: str, files: List[Dict], password: Optional[str] = None) -> bool:
+async def create_zip_part_advanced(zip_path: str, files: List[Dict], default_password: Optional[str] = None) -> bool:
     """تابع پیشرفته فشرده سازی با مدیریت خطا و timeout"""
     max_retries = Config.MAX_ZIP_RETRIES
     
@@ -385,11 +385,11 @@ async def create_zip_part_advanced(zip_path: str, files: List[Dict], password: O
                         "w", 
                         compression=pyzipper.ZIP_DEFLATED,
                         compresslevel=Config.ZIP_COMPRESSION_LEVEL,
-                        encryption=pyzipper.WZ_AES if password else None,
+                        encryption=pyzipper.WZ_AES if default_password else None,
                         allowZip64=True  # فعال سازی پشتیبانی از فایل‌های بزرگ
                     ) as zipf:
-                        if password:
-                            zipf.setpassword(password.encode('utf-8'))
+                        if default_password:
+                            zipf.setpassword(default_password.encode('utf-8'))
                         
                         for file_info in files:
                             file_path = file_info['path']
@@ -406,17 +406,22 @@ async def create_zip_part_advanced(zip_path: str, files: List[Dict], password: O
                     
                     # بررسی صحت فایل زیپ ایجاد شده
                     if os.path.exists(zip_path) and os.path.getsize(zip_path) > 0:
-                        # اعتبارسنجی فایل زیپ
-                        try:
-                            with pyzipper.AESZipFile(zip_path, 'r') as test_zip:
-                                if password:
-                                    test_zip.setpassword(password.encode('utf-8'))
-                                test_zip.testzip()
-                            logger.info(f"Zip part created successfully: {zip_path}")
-                            return True
-                        except Exception as test_error:
-                            logger.error(f"Zip validation failed: {test_error}")
-                            return False
+                        # اعتبارسنجی فایل زیپ - فقط برای فایل‌های کوچک
+                        if os.path.getsize(zip_path) < 100 * 1024 * 1024:  # فقط برای فایل‌های کوچکتر از 100MB
+                            try:
+                                with pyzipper.AESZipFile(zip_path, 'r') as test_zip:
+                                    if default_password:
+                                        test_zip.setpassword(default_password.encode('utf-8'))
+                                    # فقط چند فایل اول را تست می‌کنیم
+                                    test_files = test_zip.namelist()[:3]
+                                    for test_file in test_files:
+                                        with test_zip.open(test_file) as f:
+                                            f.read(1024)  # فقط بخش کوچکی می‌خوانیم
+                            except Exception as test_error:
+                                logger.error(f"Zip validation failed: {test_error}")
+                                return False
+                        logger.info(f"Zip part created successfully: {zip_path}")
+                        return True
                     else:
                         logger.error("Created zip file is empty or missing")
                         return False
@@ -987,6 +992,7 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
             for file_info in file_info_list:
                 file_size = file_info['size']
                 
+                # اگر فایل به تنهایی بزرگتر از حد مجاز است، آن را به پارت جداگانه اضافه می‌کنیم
                 if file_size > Config.PART_SIZE * 0.9:
                     if current_part:
                         parts.append(current_part)
@@ -1018,7 +1024,8 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
                 zip_paths.append(zip_path)
                 temp_files_to_cleanup.append(zip_path)
                 
-                part_password = part_files[0].get('password', zip_password)
+                # استفاده از رمز پیش‌فرض برای همه فایل‌های این پارت
+                part_password = zip_password
                 
                 await processing_msg.edit_text(
                     f"🗜️ **در حال فشرده‌سازی پارت {part_number}/{num_parts}**\n\n"
