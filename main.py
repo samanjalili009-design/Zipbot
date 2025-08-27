@@ -71,8 +71,10 @@ class ProgressTracker:
         self.stage = ""
         self.file_name = ""
         self.message = None
+        self.file_index = 0
+        self.total_files = 0
 
-    def reset(self, message: Message = None, stage: str = "", file_name: str = ""):
+    def reset(self, message: Message = None, stage: str = "", file_name: str = "", file_index: int = 0, total_files: int = 0):
         self.start_time = time.time()
         self.last_update = 0
         self.last_text = ""
@@ -82,6 +84,8 @@ class ProgressTracker:
         self.stage = stage
         self.file_name = file_name
         self.message = message
+        self.file_index = file_index
+        self.total_files = total_files
 
     async def update(self, current: int, total: int):
         try:
@@ -106,15 +110,26 @@ class ProgressTracker:
             
             bar = self.get_progress_bar(percent)
             
-            progress_text = (
-                f"🚀 **{self.stage}**\n\n"
-                f"{bar}\n\n"
-                f"📁 فایل: `{self.file_name[:30]}{'...' if len(self.file_name) > 30 else ''}`\n"
-                f"📊 پیشرفت: `{self.format_size(current)} / {self.format_size(total)}`\n"
-                f"⚡ سرعت: `{self.format_size(speed)}/s`\n"
-                f"⏰ زمان باقیمانده: `{self.format_time(int(eta))}`\n"
-                f"🕐 زمان سپری شده: `{self.format_time(int(elapsed))}`"
-            )
+            if self.total_files > 1:
+                progress_text = (
+                    f"🚀 **{self.stage} فایل {self.file_index}/{self.total_files}**\n\n"
+                    f"{bar}\n\n"
+                    f"📁 فایل: `{self.file_name[:30]}{'...' if len(self.file_name) > 30 else ''}`\n"
+                    f"📊 پیشرفت: `{self.format_size(current)} / {self.format_size(total)}`\n"
+                    f"⚡ سرعت: `{self.format_size(speed)}/s`\n"
+                    f"⏰ زمان باقیمانده: `{self.format_time(int(eta))}`\n"
+                    f"🕐 زمان سپری شده: `{self.format_time(int(elapsed))}`"
+                )
+            else:
+                progress_text = (
+                    f"🚀 **{self.stage}**\n\n"
+                    f"{bar}\n\n"
+                    f"📁 فایل: `{self.file_name[:30]}{'...' if len(self.file_name) > 30 else ''}`\n"
+                    f"📊 پیشرفت: `{self.format_size(current)} / {self.format_size(total)}`\n"
+                    f"⚡ سرعت: `{self.format_size(speed)}/s`\n"
+                    f"⏰ زمان باقیمانده: `{self.format_time(int(eta))}`\n"
+                    f"🕐 زمان سپری شده: `{self.format_time(int(elapsed))}`"
+                )
             
             if self.last_text != progress_text and self.message:
                 try:
@@ -212,7 +227,7 @@ async def safe_send_message(chat_id, text, reply_to_message_id=None, reply_marku
         logger.error(f"Failed to send message even without parse_mode: {e}")
         return None
 
-async def safe_download_media(message, file_path, file_name=""):
+async def safe_download_media(message, file_path, file_name="", file_index=0, total_files=0, processing_msg=None):
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -222,7 +237,7 @@ async def safe_download_media(message, file_path, file_name=""):
                 os.makedirs(os.path.dirname(file_path), exist_ok=True)
                 
                 # ریست کردن ترکر پیشرفت
-                progress_tracker.reset(message, "دانلود", file_name)
+                progress_tracker.reset(processing_msg, "دانلود", file_name, file_index, total_files)
                 
                 # دانلود با مدیریت پیشرفت
                 await app.download_media(
@@ -376,7 +391,7 @@ async def upload_zip_part(zip_path: str, part_number: int, total_parts: int,
             part_size = os.path.getsize(zip_path)
             
             # ریست کردن ترکر برای آپلود
-            progress_tracker.reset(processing_msg, "آپلود", f"پارت {part_number + 1}")
+            progress_tracker.reset(processing_msg, "آپلود", f"پارت {part_number + 1}", part_number + 1, total_parts)
             
             max_retries = 3
             for attempt in range(max_retries):
@@ -748,9 +763,6 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
             total_files = len(user_files[user_id])
             file_info_list = []
             
-            # نمایش نوار پیشرفت برای دانلود
-            progress_tracker.reset(processing_msg, "دانلود", f"{total_files} فایل")
-            
             for i, finfo in enumerate(user_files[user_id], 1):
                 file_msg_id = finfo["message_id"]
                 
@@ -763,18 +775,13 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
                     file_name = finfo["file_name"]
                     file_path = os.path.join(tmp_dir, file_name)
                     
-                    # به‌روزرسانی وضعیت برای فایل جاری
-                    progress_text = (
-                        f"📥 **در حال دانلود فایل {i}/{total_files}**\n\n"
-                        f"📝 نام: `{file_name}`\n"
-                        f"⏳ لطفاً منتظر بمانید..."
-                    )
-                    await processing_msg.edit_text(progress_text, parse_mode=enums.ParseMode.MARKDOWN)
-                    
                     success = await safe_download_media(
                         file_msg,
                         file_path,
-                        file_name
+                        file_name,
+                        i,
+                        total_files,
+                        processing_msg
                     )
                     
                     if success and os.path.exists(file_path) and os.path.getsize(file_path) > 0:
