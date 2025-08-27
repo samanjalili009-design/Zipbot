@@ -22,28 +22,43 @@ from datetime import datetime
 import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import queue
+import re
+from dotenv import load_dotenv
 
-# ===== تنظیمات پیشرفته =====
+# ===== بارگذاری تنظیمات از محیط =====
+load_dotenv()
+
 class Config:
-    API_ID = 26180086
-    API_HASH = "d91e174c7faf0e5a6a3a2ecb0b3361f6"
-    SESSION_STRING = "BAGPefYAEAaXaj52wzDLPF0RSfWtF_Slk8nFWzYAHS9vu-HBxRUz9yLnq7m8z-ajYCQxQZO-5aNX0he9OttDjmjieYDMbDjBJtbsOT2ZwsQNe8UCAo5oFPveD5V1H0cIBMlXCG1P49G2oonf1YL1r16Nt34AJLkmzDIoFD0hhxwVBXvrUGwZmEoTtdkfORCYUMGACKO4-Al-NH35oVCkTIqmXQ5DUp9PVx6DND243VW5Xcqay7qwrwfoS4sWRA-7TMXykbHa37ZsdcCOf0VS8e6PyaYvG5BjMCd9BGRnR9IImrksYY2uBM2Bg42MLaa1WFxQtn97p5ViPF9c1MpY49bc5Gm5lwAAAAF--TK5AA"
-    ALLOWED_USER_IDS = [417536686]
-    MAX_FILE_SIZE = 2147483648  # 2GB
-    MAX_TOTAL_SIZE = 8589934592  # 8GB
-    PART_SIZE = 1900 * 1024 * 1024  # 1900MB
+    # بارگذاری از متغیرهای محیطی برای امنیت بیشتر
+    API_ID = int(os.getenv("API_ID", 26180086))
+    API_HASH = os.getenv("API_HASH", "d91e174c7faf0e5a6a3a2ecb0b3361f6")
+    SESSION_STRING = os.getenv("SESSION_STRING", "BAGPefYAEAaXaj52wzDLPF0RSfWtF_Slk8nFWzYAHS9vu-HBxRUz9yLnq7m8z-ajYCQxQZO-5aNX0he9OttDjmjieYDMbDjBJtbsOT2ZwsQNe8UCAo5oFPveD5V1H0cIBMlXCG1P49G2oonf1YL1r16Nt34AJLkmzDIoFD0hhxwVBXvrUGwZmEoTtdkfORCYUMGACKO4-Al-NH35oVCkTIqmXQ5DUp9PVx6DND243VW5Xcqay7qwrwfoS4sWRA-7TMXykbHa37ZsdcCOf0VS8e6PyaYvG5BjMCd9BGRnR9IImrksYY2uBM2Bg42MLaa1WFxQtn97p5ViPF9c1MpY49bc5Gm5lwAAAAF--TK5AA")
+    
+    # لیست کاربران مجاز (می‌تواند از محیط بارگذاری شود)
+    allowed_users = os.getenv("ALLOWED_USER_IDS", "417536686")
+    ALLOWED_USER_IDS = [int(user_id.strip()) for user_id in allowed_users.split(",") if user_id.strip()]
+    
+    # محدودیت‌های فایل با در نظر گرفتن محدودیت‌های تلگرام
+    MAX_FILE_SIZE = 1900 * 1024 * 1024  # 1900MB (کمی کمتر از 2GB برای اطمینان)
+    MAX_TOTAL_SIZE = 8 * 1024 * 1024 * 1024  # 8GB
+    PART_SIZE = 1800 * 1024 * 1024  # 1800MB (برای اطمینان از محدودیت تلگرام)
     CHUNK_SIZE = 1 * 1024 * 1024  # 1MB برای مدیریت بهتر حافظه
-    MAX_CONCURRENT_DOWNLOADS = 2
-    MAX_CONCURRENT_UPLOADS = 1
+    
+    # تنظیمات همزمانی با در نظر گرفتن محدودیت‌های تلگرام
+    MAX_CONCURRENT_DOWNLOADS = 1  # کاهش یافته برای جلوگیری از محدودیت
+    MAX_CONCURRENT_UPLOADS = 1    # کاهش یافته برای جلوگیری از محدودیت
+    
+    # سایر تنظیمات
     RETRY_DELAY = 10
-    PROGRESS_UPDATE_INTERVAL = 0.5
+    PROGRESS_UPDATE_INTERVAL = 1.0  # افزایش یافته برای کاهش بار
     DATA_FILE = "user_data.json"
     UPLOAD_CHUNK_SIZE = 4 * 1024 * 1024  # 4MB برای آپلود فایل‌های بزرگ
-    MAX_UPLOAD_RETRIES = 5
+    MAX_UPLOAD_RETRIES = 3  # کاهش تلاش‌ها برای جلوگیری از FloodWait
     ZIP_COMPRESSION_LEVEL = 6  # سطح فشرده سازی (1-9)
-    MAX_ZIP_RETRIES = 3  # حداکثر تلاش برای فشرده سازی
+    MAX_ZIP_RETRIES = 2  # کاهش تلاش برای فشرده سازی
     ZIP_BASE_TIMEOUT = 3600  # 1 hour base timeout
     ZIP_TIMEOUT_PER_GB = 1800  # 30 minutes per additional GB
+    MAX_QUEUE_SIZE = 10  # حداکثر اندازه صف برای جلوگیری از انباشته شدن
 
 # ===== لاگ پیشرفته =====
 logging.basicConfig(
@@ -67,7 +82,7 @@ task_queue = deque()
 processing = False
 download_semaphore = asyncio.Semaphore(Config.MAX_CONCURRENT_DOWNLOADS)
 upload_semaphore = asyncio.Semaphore(Config.MAX_CONCURRENT_UPLOADS)
-zip_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ZipWorker")
+zip_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ZipWorker")  # کاهش کارگران
 
 # ===== کلاس مدیریت پیشرفت =====
 class ProgressTracker:
@@ -85,6 +100,7 @@ class ProgressTracker:
         self.total_files = 0
         self.lock = asyncio.Lock()
         self.zip_progress_queue = queue.Queue()
+        self.active = False
 
     def reset(self, message: Message = None, stage: str = "", file_name: str = "", file_index: int = 0, total_files: int = 0):
         self.start_time = time.time()
@@ -98,8 +114,12 @@ class ProgressTracker:
         self.message = message
         self.file_index = file_index
         self.total_files = total_files
+        self.active = True
 
     async def update(self, current: int, total: int):
+        if not self.active:
+            return
+            
         try:
             async with self.lock:
                 now = time.time()
@@ -126,7 +146,7 @@ class ProgressTracker:
                     progress_text = (
                         f"🚀 **{self.stage} فایل {self.file_index}/{self.total_files}**\n\n"
                         f"{bar}\n\n"
-                        f"📁 فایل: `{self.file_name[:30]}{'...' if len(self.file_name) > 30 else ''}`\n"
+                        f"📁 فایل: `{self.escape_markdown(self.file_name[:30])}{'...' if len(self.file_name) > 30 else ''}`\n"
                         f"📊 پیشرفت: `{self.format_size(current)} / {self.format_size(total)}`\n"
                         f"⚡ سرعت: `{self.format_size(speed)}/s`\n"
                         f"⏰ زمان باقیمانده: `{self.format_time(int(eta))}`\n"
@@ -136,7 +156,7 @@ class ProgressTracker:
                     progress_text = (
                         f"🚀 **{self.stage}**\n\n"
                         f"{bar}\n\n"
-                        f"📁 فایل: `{self.file_name[:30]}{'...' if len(self.file_name) > 30 else ''}`\n"
+                        f"📁 فایل: `{self.escape_markdown(self.file_name[:30])}{'...' if len(self.file_name) > 30 else ''}`\n"
                         f"📊 پیشرفت: `{self.format_size(current)} / {self.format_size(total)}`\n"
                         f"⚡ سرعت: `{self.format_size(speed)}/s`\n"
                         f"⏰ زمان باقیمانده: `{self.format_time(int(eta))}`\n"
@@ -147,6 +167,9 @@ class ProgressTracker:
                     try:
                         await self.message.edit_text(progress_text, parse_mode=enums.ParseMode.MARKDOWN)
                         self.last_text = progress_text
+                    except FloodWait as e:
+                        logger.warning(f"FloodWait while updating progress: {e.value} seconds")
+                        await asyncio.sleep(e.value)
                     except Exception as e:
                         logger.error(f"Error updating progress: {e}")
                         
@@ -156,14 +179,20 @@ class ProgressTracker:
     async def update_zip_progress(self):
         """بروزرسانی پیشرفت فشرده‌سازی"""
         try:
-            while True:
+            while self.active:
                 try:
                     current, total = self.zip_progress_queue.get_nowait()
                     await self.update(current, total)
                 except queue.Empty:
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.5)
         except Exception as e:
             logger.error(f"Zip progress update error: {e}")
+
+    @staticmethod
+    def escape_markdown(text: str) -> str:
+        """اجتناب از کاراکترهای مخصوص مارکداون"""
+        escape_chars = r'_*[]()~`>#+-=|{}.!'
+        return ''.join(f'\\{char}' if char in escape_chars else char for char in text)
 
     @staticmethod
     def get_progress_bar(percentage: float, length: int = 20) -> str:
@@ -302,7 +331,7 @@ async def process_scheduled_tasks():
         now = time.time()
         tasks_to_run = []
         
-        for i, (execution_time, task_func, args, kwargs) in enumerate(scheduled_tasks):
+        for i, (execution_time, task_func, args, kwargs) in enumerate(scheduled_tasks[:]):
             if execution_time <= now:
                 tasks_to_run.append((task_func, args, kwargs))
                 scheduled_tasks.pop(i)
@@ -326,6 +355,12 @@ async def process_task_queue():
     while True:
         if not task_queue:
             await asyncio.sleep(1)
+            continue
+        
+        if len(task_queue) > Config.MAX_QUEUE_SIZE:
+            # جلوگیری از انباشته شدن بیش از حد تسک‌ها
+            logger.warning(f"Task queue is full ({len(task_queue)} tasks), skipping new tasks")
+            await asyncio.sleep(5)
             continue
         
         processing = True
@@ -360,8 +395,11 @@ async def process_task_queue():
             save_user_data()
 
 def add_to_queue(task_func: Callable, *args, **kwargs):
-    task_queue.append((task_func, args, kwargs))
-    logger.info(f"Task added to queue. Queue size: {len(task_queue)}")
+    if len(task_queue) < Config.MAX_QUEUE_SIZE:
+        task_queue.append((task_func, args, kwargs))
+        logger.info(f"Task added to queue. Queue size: {len(task_queue)}")
+    else:
+        logger.warning("Task queue is full, skipping task")
 
 async def notify_user_floodwait(user_id: int, wait_time: int):
     try:
@@ -436,7 +474,8 @@ def zip_creation_task(zip_path: str, files: List[Dict], password: Optional[str],
                     processed_size += file_info['size']
                     
                     # ارسال پیشرفت به صف
-                    progress_queue.put((processed_size, total_size))
+                    if progress_queue:
+                        progress_queue.put((processed_size, total_size))
                     logger.debug(f"Added {arcname} to zip, progress: {processed_size}/{total_size}")
                     
                 except Exception as e:
@@ -513,7 +552,7 @@ async def create_zip_part_advanced(zip_path: str, files: List[Dict], default_pas
                 else:
                     return False
             
-            # محاس� timeout بر اساس حجم
+            # محاسبه timeout بر اساس حجم
             total_size_mb = sum(f['size'] for f in files) / (1024 * 1024)
             dynamic_timeout = calculate_zip_timeout(total_size_mb)
             
@@ -590,7 +629,12 @@ async def upload_large_file(file_path: str, chat_id: int, caption: str, reply_to
                     logger.info(f"Upload retry {attempt + 1}/{max_retries} after {wait_time:.1f} seconds")
                     await asyncio.sleep(wait_time)
                 
-                # پارامتر chunk_size حذف شده زیرا در نسخه‌های جدید Pyrogram پشتیبانی نمی‌شود
+                # بررسی وجود فایل
+                if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+                    logger.error(f"File not found or empty: {file_path}")
+                    return False
+                
+                # آپلود فایل
                 await app.send_document(
                     chat_id=chat_id,
                     document=file_path,
@@ -808,7 +852,7 @@ async def handle_file(client, message: Message):
     await safe_send_message(
         message.chat.id,
         f"✅ **فایل ذخیره شد**\n\n"
-        f"📝 نام: `{file_name}`\n"
+        f"📝 نام: `{progress_tracker.escape_markdown(file_name)}`\n"
         f"📦 حجم: `{progress_tracker.format_size(file_size)}`\n"
         f"🔑 رمز: `{password if password else '❌ ندارد'}`\n\n"
         f"📊 وضعیت فعلی: `{file_count}` فایل (`{progress_tracker.format_size(total_size)}`)\n\n"
@@ -922,7 +966,7 @@ async def process_zip(client, message: Message):
             await message.reply("❌ نام فایل نمی‌تواند خالی باشد")
             return
         
-        import re
+        # حذف کاراکترهای نامعتبر از نام فایل
         zip_name = re.sub(r'[<>:"/\\|?*]', '_', zip_name)
         zip_name = zip_name[:50]
         
@@ -1247,6 +1291,9 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
                 parse_mode=enums.ParseMode.MARKDOWN
             )
     finally:
+        # غیرفعال کردن ردیابی پیشرفت
+        progress_tracker.active = False
+        
         # لغو task ردیابی پیشرفت
         if 'zip_progress_task' in locals():
             zip_progress_task.cancel()
