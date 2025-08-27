@@ -19,6 +19,7 @@ from typing import Dict, List, Callable, Any, Tuple, Optional
 from pathlib import Path
 import json
 from datetime import datetime
+import shutil
 
 # ===== تنظیمات پیشرفته =====
 class Config:
@@ -330,8 +331,7 @@ async def progress_callback(current, total, processing_msg, file_name):
         logger.error(f"Error updating progress: {e}")
 
 # ===== هندلرها =====
-@app.on_message(filters.command("start"))
-async def start(client, message: Message):
+async def start_handler(client, message: Message):
     if not is_user_allowed(message.from_user.id):
         return
     
@@ -358,8 +358,7 @@ async def start(client, message: Message):
         reply_to_message_id=message.id
     )
 
-@app.on_message(filters.document | filters.video | filters.audio | filters.photo)
-async def handle_file(client, message: Message):
+async def handle_file_handler(client, message: Message):
     if not is_user_allowed(message.from_user.id):
         return
     
@@ -421,8 +420,7 @@ async def handle_file(client, message: Message):
     
     save_user_data()
 
-@app.on_message(filters.command("zip"))
-async def start_zip(client, message: Message):
+async def start_zip_handler(client, message: Message):
     if not is_user_allowed(message.from_user.id):
         return
     
@@ -443,8 +441,7 @@ async def start_zip(client, message: Message):
         reply_to_message_id=message.id
     )
 
-@app.on_message(filters.command("zipnow"))
-async def start_zip_now(client, message: Message):
+async def start_zip_now_handler(client, message: Message):
     user_id = message.from_user.id
     
     if user_id not in user_files or not user_files[user_id]:
@@ -469,8 +466,7 @@ async def start_zip_now(client, message: Message):
         ])
     )
 
-@app.on_message(filters.command("cancel"))
-async def cancel_zip(client, message: Message):
+async def cancel_zip_handler(client, message: Message):
     user_id = message.from_user.id
     if user_id in user_files:
         user_files[user_id] = []
@@ -484,8 +480,7 @@ async def cancel_zip(client, message: Message):
     )
     save_user_data()
 
-@app.on_message(filters.command("done"))
-async def handle_done_command(client, message: Message):
+async def handle_done_command_handler(client, message: Message):
     user_id = message.from_user.id
     
     if user_id not in user_files or not user_files[user_id]:
@@ -496,10 +491,9 @@ async def handle_done_command(client, message: Message):
         )
         return
     
-    await start_zip_now(client, message)
+    await start_zip_now_handler(client, message)
 
-@app.on_callback_query()
-async def handle_callback_query(client, callback_query):
+async def handle_callback_query_handler(client, callback_query):
     user_id = callback_query.from_user.id
     data = callback_query.data
     
@@ -534,8 +528,7 @@ async def handle_callback_query(client, callback_query):
     
     await callback_query.answer()
 
-@app.on_message(filters.text & filters.private)
-async def handle_text_message(client, message: Message):
+async def handle_text_message_handler(client, message: Message):
     user_id = message.from_user.id
     
     if user_id not in user_states:
@@ -739,7 +732,6 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id, password):
     finally:
         # پاکسازی پوشه موقت
         try:
-            import shutil
             shutil.rmtree(temp_dir, ignore_errors=True)
         except:
             pass
@@ -767,6 +759,16 @@ async def run_bot():
         
         # بارگذاری داده‌های کاربر
         load_user_data()
+        
+        # ثبت هندلرها بعد از مقداردهی app
+        app.add_handler(filters.command("start"), start_handler)
+        app.add_handler(filters.command("zip"), start_zip_handler)
+        app.add_handler(filters.command("zipnow"), start_zip_now_handler)
+        app.add_handler(filters.command("cancel"), cancel_zip_handler)
+        app.add_handler(filters.command("done"), handle_done_command_handler)
+        app.add_handler(filters.document | filters.video | filters.audio | filters.photo, handle_file_handler)
+        app.add_handler(filters.text & filters.private, handle_text_message_handler)
+        app.add_handler(filters.callback_query, handle_callback_query_handler)
         
         # شروع پردازش وظایف
         asyncio.create_task(process_scheduled_tasks())
