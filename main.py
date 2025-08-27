@@ -129,7 +129,7 @@ class ProgressTracker:
     @staticmethod
     def get_progress_bar(percentage: float, length: int = 20) -> str:
         filled = int(length * percentage / 100)
-        bar = "█" * filled + "░" * (length - filled)
+        bar = "⬢" * filled + "⬡" * (length - filled)
         return f"{bar} {percentage:.1f}%"
 
     @staticmethod
@@ -374,14 +374,6 @@ async def upload_zip_part(zip_path: str, part_number: int, total_parts: int,
     try:
         async with upload_semaphore:
             part_size = os.path.getsize(zip_path)
-            
-            await processing_msg.edit_text(
-                f"📤 **در حال آپلود پارت {part_number + 1}/{total_parts}**\n\n"
-                f"📦 حجم: `{progress_tracker.format_size(part_size)}`\n"
-                f"🔑 رمز: `{password}`\n"
-                f"⏳ لطفاً منتظر بمانید...",
-                parse_mode=enums.ParseMode.MARKDOWN
-            )
             
             # ریست کردن ترکر برای آپلود
             progress_tracker.reset(processing_msg, "آپلود", f"پارت {part_number + 1}")
@@ -756,7 +748,8 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
             total_files = len(user_files[user_id])
             file_info_list = []
             
-            await processing_msg.edit_text("📥 **در حال دانلود فایل‌ها...**\n\n⏳ این مرحله ممکن است زمان بر باشد", parse_mode=enums.ParseMode.MARKDOWN)
+            # نمایش نوار پیشرفت برای دانلود
+            progress_tracker.reset(processing_msg, "دانلود", f"{total_files} فایل")
             
             for i, finfo in enumerate(user_files[user_id], 1):
                 file_msg_id = finfo["message_id"]
@@ -770,12 +763,13 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
                     file_name = finfo["file_name"]
                     file_path = os.path.join(tmp_dir, file_name)
                     
-                    await processing_msg.edit_text(
+                    # به‌روزرسانی وضعیت برای فایل جاری
+                    progress_text = (
                         f"📥 **در حال دانلود فایل {i}/{total_files}**\n\n"
                         f"📝 نام: `{file_name}`\n"
-                        f"⏳ لطفاً منتظر بمانید...",
-                        parse_mode=enums.ParseMode.MARKDOWN
+                        f"⏳ لطفاً منتظر بمانید..."
                     )
+                    await processing_msg.edit_text(progress_text, parse_mode=enums.ParseMode.MARKDOWN)
                     
                     success = await safe_download_media(
                         file_msg,
@@ -836,12 +830,6 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
                 parts.append(current_part)
             
             num_parts = len(parts)
-            await processing_msg.edit_text(
-                f"📦 **تقسیم به {num_parts} پارت**\n\n"
-                f"💾 حجم هر پارت: ~{progress_tracker.format_size(Config.PART_SIZE)}\n"
-                f"⏳ در حال شروع فرآیند...",
-                parse_mode=enums.ParseMode.MARKDOWN
-            )
             
             successful_parts = 0
             
