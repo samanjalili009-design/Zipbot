@@ -277,18 +277,28 @@ async def safe_send_message(chat_id, text, reply_to_message_id=None, reply_marku
         return None
 
 async def safe_download_media(message, file_path, file_name="", file_index=0, total_files=0, processing_msg=None):
-    max_retries = 2  # کاهش تعداد تلاش
+    max_retries = 3  # افزایش تعداد تلاش
     for attempt in range(max_retries):
         try:
             async with download_semaphore:
-                await asyncio.sleep(random.uniform(1.0, 2.0))  # کاهش تاخیر
+                await asyncio.sleep(random.uniform(1.0, 2.0))
                 
                 os.makedirs(os.path.dirname(file_path), exist_ok=True)
                 
                 progress_tracker.reset(processing_msg, "دانلود", file_name, file_index, total_files)
                 
+                # دریافت اندازه فایل
+                if message.document:
+                    file_size = message.document.file_size
+                elif message.video:
+                    file_size = message.video.file_size
+                elif message.audio:
+                    file_size = message.audio.file_size
+                else:
+                    logger.error("Message has no downloadable media")
+                    return False
+                
                 # بررسی حافظه قبل از دانلود
-                file_size = message.document.file_size if message.document else message.video.file_size if message.video else message.audio.file_size
                 if not await memory_manager.can_allocate(file_size):
                     logger.warning(f"Not enough memory to download {file_name} ({file_size/1024/1024:.1f}MB)")
                     await asyncio.sleep(5)
@@ -296,20 +306,23 @@ async def safe_download_media(message, file_path, file_name="", file_index=0, to
                 
                 await memory_manager.allocate(file_size)
                 
+                # دانلود فایل
                 await app.download_media(
                     message,
                     file_name=file_path,
                     progress=progress_tracker.update
                 )
                 
+                # بررسی موفقیت‌آمیز بودن دانلود
                 if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+                    actual_size = os.path.getsize(file_path)
+                    logger.info(f"Downloaded {file_name} successfully, size: {actual_size} bytes")
                     return True
                 else:
                     logger.warning(f"Downloaded file is empty or missing (attempt {attempt + 1})")
-                    await memory_manager.release(file_size)
                     
         except FloodWait as e:
-            wait_time = e.value + random.uniform(5, 8)  # کاهش تاخیر
+            wait_time = e.value + random.uniform(5, 8)
             logger.warning(f"Download FloodWait: {wait_time} seconds (attempt {attempt + 1})")
             await asyncio.sleep(wait_time)
         except (RPCError, aiohttp.ClientError, OSError) as e:
@@ -356,14 +369,14 @@ async def process_scheduled_tasks():
             except Exception as e:
                 logger.error(f"Scheduled task error: {e}")
         
-        await asyncio.sleep(2)  # افزایش تاخیر
+        await asyncio.sleep(2)
 
 async def process_task_queue():
     global processing
     
     while True:
         if not task_queue:
-            await asyncio.sleep(2)  # افزایش تاخیر
+            await asyncio.sleep(2)
             continue
         
         processing = True
@@ -375,7 +388,7 @@ async def process_task_queue():
             else:
                 await asyncio.to_thread(task_func, *args, **kwargs)
             
-            await asyncio.sleep(random.uniform(3.0, 6.0))  # افزایش تاخیر
+            await asyncio.sleep(random.uniform(3.0, 6.0))
             
         except FloodWait as e:
             wait_time = e.value + random.uniform(10, 15)
@@ -624,7 +637,7 @@ async def upload_large_file(file_path: str, chat_id: int, caption: str, reply_to
         try:
             async with upload_semaphore:
                 if attempt > 0:
-                    wait_time = random.uniform(10, 20)  # افزایش تاخیر
+                    wait_time = random.uniform(10, 20)
                     logger.info(f"Upload retry {attempt + 1}/{max_retries} after {wait_time:.1f} seconds")
                     await asyncio.sleep(wait_time)
                 
@@ -699,7 +712,7 @@ async def upload_zip_part(zip_path: str, part_number: int, total_parts: int,
         
         if success:
             logger.info(f"Part {part_number + 1}/{total_parts} uploaded successfully")
-            await asyncio.sleep(random.uniform(5.0, 10.0))  # افزایش تاخیر
+            await asyncio.sleep(random.uniform(5.0, 10.0))
             return True
         else:
             logger.error(f"Failed to upload part {part_number + 1}/{total_parts}")
