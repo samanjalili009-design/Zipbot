@@ -561,8 +561,8 @@ async def create_zip_part_advanced(zip_path: str, files: List[Dict], default_pas
                 if os.path.exists(zip_path):
                     os.remove(zip_path)
                     logger.info("Removed timeout zip file")
-                except Exception as e:
-                    logger.error(f"Error removing timeout zip file: {e}")
+            except Exception as e:
+                logger.error(f"Error removing timeout zip file: {e}")
             
             if attempt < max_retries - 1:
                 retry_delay = random.uniform(10, 20)
