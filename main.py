@@ -22,6 +22,7 @@ from datetime import datetime
 import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import queue
+import contextlib
 
 # ===== تنظیمات پیشرفته =====
 class Config:
@@ -44,6 +45,7 @@ class Config:
     MAX_ZIP_RETRIES = 3  # حداکثر تلاش برای فشرده سازی
     ZIP_BASE_TIMEOUT = 3600  # 1 hour base timeout
     ZIP_TIMEOUT_PER_GB = 1800  # 30 minutes per additional GB
+    ZIP_MEMORY_LIMIT = 200 * 1024 * 1024  # 200MB memory limit for zip operations
 
 # ===== لاگ پیشرفته =====
 logging.basicConfig(
@@ -431,8 +433,15 @@ def zip_creation_task(zip_path: str, files: List[Dict], password: Optional[str],
                     continue
                 
                 try:
-                    # اضافه کردن فایل به زیپ
-                    zipf.write(file_path, arcname)
+                    # اضافه کردن فایل به زیپ با مدیریت حافظه
+                    with open(file_path, 'rb') as src_file:
+                        with zipf.open(arcname, 'w') as dest_file:
+                            while True:
+                                chunk = src_file.read(Config.CHUNK_SIZE)
+                                if not chunk:
+                                    break
+                                dest_file.write(chunk)
+                    
                     processed_size += file_info['size']
                     
                     # ارسال پیشرفت به صف
@@ -552,8 +561,8 @@ async def create_zip_part_advanced(zip_path: str, files: List[Dict], default_pas
                 if os.path.exists(zip_path):
                     os.remove(zip_path)
                     logger.info("Removed timeout zip file")
-            except Exception as e:
-                logger.error(f"Error removing timeout zip file: {e}")
+                except Exception as e:
+                    logger.error(f"Error removing timeout zip file: {e}")
             
             if attempt < max_retries - 1:
                 retry_delay = random.uniform(10, 20)
@@ -590,14 +599,15 @@ async def upload_large_file(file_path: str, chat_id: int, caption: str, reply_to
                     logger.info(f"Upload retry {attempt + 1}/{max_retries} after {wait_time:.1f} seconds")
                     await asyncio.sleep(wait_time)
                 
-                # پارامتر chunk_size حذف شده زیرا در نسخه‌های جدید Pyrogram پشتیبانی نمی‌شود
+                # استفاده از chunk_size برای مدیریت حافظه
                 await app.send_document(
                     chat_id=chat_id,
                     document=file_path,
                     caption=caption,
                     reply_to_message_id=reply_to_message_id,
                     progress=progress_callback,
-                    progress_args=progress_args
+                    progress_args=progress_args,
+                    chunk_size=Config.UPLOAD_CHUNK_SIZE
                 )
                 
                 logger.info(f"File uploaded successfully: {file_path}")
