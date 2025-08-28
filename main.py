@@ -39,6 +39,10 @@ app = Flask(__name__)
 def home():
     return "🤖 Telegram Zip Bot is Running!"
 
+@app.route('/health')
+def health():
+    return "✅ Bot is healthy!"
+
 # دیکشنری برای ذخیره اطلاعات پیشرفت
 progress_data = {}
 
@@ -180,7 +184,7 @@ async def upload_file_with_progress(event, file_path, caption=""):
 @client.on(events.NewMessage(from_users=ALLOWED_USER_IDS))
 async def handle_message(event):
     """مدیریت پیام‌های دریافتی"""
-    if not event.message.file:
+    if not event.message.media:
         await event.reply("لطفاً یک فایل ارسال کنید.")
         return
     
