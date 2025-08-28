@@ -58,9 +58,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ===== کلاینت Pyrogram =====
-app = None
-
 # ===== داده‌ها و وضعیت =====
 user_files: Dict[int, List] = {}
 user_states: Dict[int, Any] = {}
@@ -438,236 +435,240 @@ async def cleanup_files(file_paths: List[str]):
             logger.error(f"Error cleaning up file {file_path}: {e}")
 
 # ===== هندلرها =====
-@app.on_message(filters.command("start"))
-async def start(client, message: Message):
-    if not is_user_allowed(message.from_user.id):
-        return
+async def register_handlers():
+    """ثبت همه هندلرها بعد از راه‌اندازی کلاینت"""
     
-    welcome_text = (
-        "👋 **به ربات فشرده‌ساز پیشرفته خوش آمدید!**\n\n"
-        "📦 **امکانات:**\n"
-        "• فشرده‌سازی فایل‌ها با پسورد\n"
-        "• تقسیم به پارت‌های 2GB\n"
-        "• پشتیبانی از فایل‌های بزرگ\n\n"
-        "📝 **دستورات:**\n"
-        "/start - نمایش این راهنما\n"
-        "/zip - شروع فشرده‌سازی\n"
-        "/zipnow - فشرده‌سازی فوری\n"
-        "/cancel - لغو عملیات\n"
-        "/done - اتمام افزودن فایل"
-    )
-    
-    await safe_send_message(
-        message.chat.id,
-        welcome_text,
-        reply_to_message_id=message.id
-    )
-
-@app.on_message(filters.document | filters.video | filters.audio)
-async def handle_file(client, message: Message):
-    if not is_user_allowed(message.from_user.id):
-        return
-    
-    user_id = message.from_user.id
-    
-    try:
-        # دریافت اطلاعات فایل
-        if message.document:
-            file_name = message.document.file_name
-            file_size = message.document.file_size
-        elif message.video:
-            file_name = message.video.file_name or f"video_{message.id}.mp4"
-            file_size = message.video.file_size
-        elif message.audio:
-            file_name = message.audio.file_name or f"audio_{message.id}.mp3"
-            file_size = message.audio.file_size
-        else:
+    @app.on_message(filters.command("start"))
+    async def start_handler(client, message: Message):
+        if not is_user_allowed(message.from_user.id):
             return
         
-        # بررسی حجم فایل
-        if file_size > Config.MAX_FILE_SIZE:
-            await safe_send_message(
-                message.chat.id,
-                f"❌ **حجم فایل بسیار زیاد است!**\n"
-                f"📁 فایل: {file_name}\n"
-                f"📊 حجم: {file_size / (1024*1024*1024):.1f} GB\n"
-                f"⚠️ حداکثر حجم مجاز: {Config.MAX_FILE_SIZE / (1024*1024*1024):.1f} GB",
-                reply_to_message_id=message.id
-            )
+        welcome_text = (
+            "👋 **به ربات فشرده‌ساز پیشرفته خوش آمدید!**\n\n"
+            "📦 **امکانات:**\n"
+            "• فشرده‌سازی فایل‌ها با پسورد\n"
+            "• تقسیم به پارت‌های 2GB\n"
+            "• پشتیبانی از فایل‌های بزرگ\n\n"
+            "📝 **دستورات:**\n"
+            "/start - نمایش این راهنما\n"
+            "/zip - شروع فشرده‌سازی\n"
+            "/zipnow - فشرده‌سازی فوری\n"
+            "/cancel - لغو عملیات\n"
+            "/done - اتمام افزودن فایل"
+        )
+        
+        await safe_send_message(
+            message.chat.id,
+            welcome_text,
+            reply_to_message_id=message.id
+        )
+
+    @app.on_message(filters.document | filters.video | filters.audio)
+    async def handle_file_handler(client, message: Message):
+        if not is_user_allowed(message.from_user.id):
             return
         
-        # افزودن فایل به لیست کاربر
-        if user_id not in user_files:
-            user_files[user_id] = []
+        user_id = message.from_user.id
         
-        user_files[user_id].append({
-            'message_id': message.id,
-            'file_name': file_name,
-            'file_size': file_size,
-            'chat_id': message.chat.id
-        })
-        
-        total_size = sum(f['file_size'] for f in user_files[user_id])
-        
-        await safe_send_message(
-            message.chat.id,
-            f"✅ **فایل افزوده شد**\n"
-            f"📁 نام: {file_name}\n"
-            f"📊 حجم: {file_size / (1024*1024):.1f} MB\n"
-            f"📦 کل فایل‌ها: {len(user_files[user_id])}\n"
-            f"💾 حجم کل: {total_size / (1024*1024*1024):.1f} GB\n\n"
-            f"📝 برای افزودن فایل‌های بیشتر ارسال کنید یا /done را بفرستید",
-            reply_to_message_id=message.id
-        )
-        
-        save_user_data()
-        
-    except Exception as e:
-        logger.error(f"Error handling file: {e}")
-        await safe_send_message(
-            message.chat.id,
-            "❌ **خطا در پردازش فایل**\nلطفاً دوباره تلاش کنید.",
-            reply_to_message_id=message.id
-        )
-
-@app.on_message(filters.command("zip"))
-async def start_zip(client, message: Message):
-    if not is_user_allowed(message.from_user.id):
-        return
-    
-    user_id = message.from_user.id
-    
-    if user_id not in user_files or not user_files[user_id]:
-        await safe_send_message(
-            message.chat.id,
-            "❌ **هیچ فایلی برای فشرده‌سازی وجود ندارد!**\nلطفاً ابتدا فایل‌ها را ارسال کنید.",
-            reply_to_message_id=message.id
-        )
-        return
-    
-    user_states[user_id] = "waiting_password"
-    
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("بدون پسورد", callback_data="nopassword")],
-        [InlineKeyboardButton("لغو", callback_data="cancel")]
-    ])
-    
-    await safe_send_message(
-        message.chat.id,
-        "🔐 **لطفاً پسورد دلخواه را وارد کنید:**\n"
-        "• یا از دکمه 'بدون پسورد' استفاده کنید\n"
-        "• یا /cancel برای لغو",
-        reply_to_message_id=message.id,
-        reply_markup=keyboard
-    )
-
-@app.on_message(filters.command("zipnow"))
-async def start_zip_now(client, message: Message):
-    user_id = message.from_user.id
-    
-    if user_id not in user_files or not user_files[user_id]:
-        await safe_send_message(
-            message.chat.id,
-            "❌ **هیچ فایلی برای فشرده‌سازی وجود ندارد!**",
-            reply_to_message_id=message.id
-        )
-        return
-    
-    # شروع فشرده‌سازی بدون پسورد
-    await process_zip_files(user_id, "archive", message.chat.id, message.id)
-
-@app.on_message(filters.command("cancel"))
-async def cancel_zip(client, message: Message):
-    user_id = message.from_user.id
-    if user_id in user_files:
-        user_files[user_id] = []
-        user_states[user_id] = None
-        save_user_data()
-    
-    await safe_send_message(
-        message.chat.id,
-        "✅ **عملیات لغو شد**\nهمه فایل‌ها پاکسازی شدند.",
-        reply_to_message_id=message.id
-    )
-
-@app.on_message(filters.command("done"))
-async def handle_done_command(client, message: Message):
-    user_id = message.from_user.id
-    
-    if user_id not in user_files or not user_files[user_id]:
-        await safe_send_message(
-            message.chat.id,
-            "❌ **هیچ فایلی برای پردازش وجود ندارد!**",
-            reply_to_message_id=message.id
-        )
-        return
-    
-    await start_zip(client, message)
-
-@app.on_callback_query()
-async def handle_callback_query(client, callback_query):
-    user_id = callback_query.from_user.id
-    data = callback_query.data
-    
-    try:
-        if data == "nopassword":
-            user_states[user_id] = None
-            await callback_query.message.edit_text("✅ فشرده‌سازی بدون پسورد شروع شد...")
-            await process_zip_files(user_id, "archive", callback_query.message.chat.id, callback_query.message.id)
+        try:
+            # دریافت اطلاعات فایل
+            if message.document:
+                file_name = message.document.file_name
+                file_size = message.document.file_size
+            elif message.video:
+                file_name = message.video.file_name or f"video_{message.id}.mp4"
+                file_size = message.video.file_size
+            elif message.audio:
+                file_name = message.audio.file_name or f"audio_{message.id}.mp3"
+                file_size = message.audio.file_size
+            else:
+                return
             
-        elif data == "cancel":
-            if user_id in user_files:
-                user_files[user_id] = []
-                user_states[user_id] = None
-                save_user_data()
-            await callback_query.message.edit_text("✅ عملیات لغو شد")
-            
-    except Exception as e:
-        logger.error(f"Error in callback query: {e}")
-        await callback_query.answer("خطا در پردازش", show_alert=True)
-
-def non_command_filter(_, __, message: Message):
-    user_id = message.from_user.id
-    return (message.text and 
-            not message.text.startswith('/') and 
-            user_id in user_states and 
-            user_states.get(user_id) in ["waiting_password", "waiting_filename"])
-
-non_command = filters.create(non_command_filter)
-
-@app.on_message(non_command)
-async def process_zip(client, message: Message):
-    user_id = message.from_user.id
-    current_state = user_states.get(user_id)
-    
-    try:
-        if current_state == "waiting_password":
-            password = message.text.strip()
-            if len(password) > 100:
+            # بررسی حجم فایل
+            if file_size > Config.MAX_FILE_SIZE:
                 await safe_send_message(
                     message.chat.id,
-                    "❌ **پسورد بسیار طولانی است!**\nحداکثر 100 کاراکتر مجاز است.",
+                    f"❌ **حجم فایل بسیار زیاد است!**\n"
+                    f"📁 فایل: {file_name}\n"
+                    f"📊 حجم: {file_size / (1024*1024*1024):.1f} GB\n"
+                    f"⚠️ حداکثر حجم مجاز: {Config.MAX_FILE_SIZE / (1024*1024*1024):.1f} GB",
                     reply_to_message_id=message.id
                 )
                 return
             
-            user_states[user_id] = None
+            # افزودن فایل به لیست کاربر
+            if user_id not in user_files:
+                user_files[user_id] = []
+            
+            user_files[user_id].append({
+                'message_id': message.id,
+                'file_name': file_name,
+                'file_size': file_size,
+                'chat_id': message.chat.id
+            })
+            
+            total_size = sum(f['file_size'] for f in user_files[user_id])
+            
             await safe_send_message(
                 message.chat.id,
-                f"✅ **پسورد تنظیم شد:** `{password}`\nشروع فشرده‌سازی...",
+                f"✅ **فایل افزوده شد**\n"
+                f"📁 نام: {file_name}\n"
+                f"📊 حجم: {file_size / (1024*1024):.1f} MB\n"
+                f"📦 کل فایل‌ها: {len(user_files[user_id])}\n"
+                f"💾 حجم کل: {total_size / (1024*1024*1024):.1f} GB\n\n"
+                f"📝 برای افزودن فایل‌های بیشتر ارسال کنید یا /done را بفرستید",
                 reply_to_message_id=message.id
             )
             
-            await process_zip_files(user_id, "archive", message.chat.id, message.id, password)
+            save_user_data()
             
-    except Exception as e:
-        logger.error(f"Error in process_zip: {e}")
+        except Exception as e:
+            logger.error(f"Error handling file: {e}")
+            await safe_send_message(
+                message.chat.id,
+                "❌ **خطا در پردازش فایل**\nلطفاً دوباره تلاش کنید.",
+                reply_to_message_id=message.id
+            )
+
+    @app.on_message(filters.command("zip"))
+    async def start_zip_handler(client, message: Message):
+        if not is_user_allowed(message.from_user.id):
+            return
+        
+        user_id = message.from_user.id
+        
+        if user_id not in user_files or not user_files[user_id]:
+            await safe_send_message(
+                message.chat.id,
+                "❌ **هیچ فایلی برای فشرده‌سازی وجود ندارد!**\nلطفاً ابتدا فایل‌ها را ارسال کنید.",
+                reply_to_message_id=message.id
+            )
+            return
+        
+        user_states[user_id] = "waiting_password"
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("بدون پسورد", callback_data="nopassword")],
+            [InlineKeyboardButton("لغو", callback_data="cancel")]
+        ])
+        
         await safe_send_message(
             message.chat.id,
-            "❌ **خطا در پردازش**\nلطفاً دوباره تلاش کنید.",
+            "🔐 **لطفاً پسورد دلخواه را وارد کنید:**\n"
+            "• یا از دکمه 'بدون پسورد' استفاده کنید\n"
+            "• یا /cancel برای لغو",
+            reply_to_message_id=message.id,
+            reply_markup=keyboard
+        )
+
+    @app.on_message(filters.command("zipnow"))
+    async def start_zip_now_handler(client, message: Message):
+        user_id = message.from_user.id
+        
+        if user_id not in user_files or not user_files[user_id]:
+            await safe_send_message(
+                message.chat.id,
+                "❌ **هیچ فایلی برای فشرده‌سازی وجود ندارد!**",
+                reply_to_message_id=message.id
+            )
+            return
+        
+        # شروع فشرده‌سازی بدون پسورد
+        await process_zip_files(user_id, "archive", message.chat.id, message.id)
+
+    @app.on_message(filters.command("cancel"))
+    async def cancel_zip_handler(client, message: Message):
+        user_id = message.from_user.id
+        if user_id in user_files:
+            user_files[user_id] = []
+            user_states[user_id] = None
+            save_user_data()
+        
+        await safe_send_message(
+            message.chat.id,
+            "✅ **عملیات لغو شد**\nهمه فایل‌ها پاکسازی شدند.",
             reply_to_message_id=message.id
         )
 
+    @app.on_message(filters.command("done"))
+    async def handle_done_command_handler(client, message: Message):
+        user_id = message.from_user.id
+        
+        if user_id not in user_files or not user_files[user_id]:
+            await safe_send_message(
+                message.chat.id,
+                "❌ **هیچ فایلی برای پردازش وجود ندارد!**",
+                reply_to_message_id=message.id
+            )
+            return
+        
+        await start_zip_handler(client, message)
+
+    @app.on_callback_query()
+    async def handle_callback_query_handler(client, callback_query):
+        user_id = callback_query.from_user.id
+        data = callback_query.data
+        
+        try:
+            if data == "nopassword":
+                user_states[user_id] = None
+                await callback_query.message.edit_text("✅ فشرده‌سازی بدون پسورد شروع شد...")
+                await process_zip_files(user_id, "archive", callback_query.message.chat.id, callback_query.message.id)
+                
+            elif data == "cancel":
+                if user_id in user_files:
+                    user_files[user_id] = []
+                    user_states[user_id] = None
+                    save_user_data()
+                await callback_query.message.edit_text("✅ عملیات لغو شد")
+                
+        except Exception as e:
+            logger.error(f"Error in callback query: {e}")
+            await callback_query.answer("خطا در پردازش", show_alert=True)
+
+    def non_command_filter(_, __, message: Message):
+        user_id = message.from_user.id
+        return (message.text and 
+                not message.text.startswith('/') and 
+                user_id in user_states and 
+                user_states.get(user_id) in ["waiting_password", "waiting_filename"])
+    
+    non_command = filters.create(non_command_filter)
+
+    @app.on_message(non_command)
+    async def process_zip_handler(client, message: Message):
+        user_id = message.from_user.id
+        current_state = user_states.get(user_id)
+        
+        try:
+            if current_state == "waiting_password":
+                password = message.text.strip()
+                if len(password) > 100:
+                    await safe_send_message(
+                        message.chat.id,
+                        "❌ **پسورد بسیار طولانی است!**\nحداکثر 100 کاراکتر مجاز است.",
+                        reply_to_message_id=message.id
+                    )
+                    return
+                
+                user_states[user_id] = None
+                await safe_send_message(
+                    message.chat.id,
+                    f"✅ **پسورد تنظیم شد:** `{password}`\nشروع فشرده‌سازی...",
+                    reply_to_message_id=message.id
+                )
+                
+                await process_zip_files(user_id, "archive", message.chat.id, message.id, password)
+                
+        except Exception as e:
+            logger.error(f"Error in process_zip: {e}")
+            await safe_send_message(
+                message.chat.id,
+                "❌ **خطا در پردازش**\nلطفاً دوباره تلاش کنید.",
+                reply_to_message_id=message.id
+            )
+
+# ===== تابع اصلی پردازش زیپ =====
 async def process_zip_files(user_id, zip_name, chat_id, message_id, password=None):
     processing_msg = None
     temp_downloaded_files = []  # لیست فایل‌های دانلود شده
@@ -841,15 +842,6 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id, password=Non
         
         # پاکسازی فایل‌های موقت در صورت خطا
         await cleanup_files(temp_downloaded_files)
-        
-        # پاکسازی دایرکتوری موقت اگر وجود دارد
-        temp_dir_path = None
-        for file_path in temp_downloaded_files:
-            temp_dir_path = os.path.dirname(os.path.dirname(file_path))
-            break
-        
-        if temp_dir_path and os.path.exists(temp_dir_path):
-            await cleanup_files([temp_dir_path])
 
 async def run_bot():
     global app
@@ -866,6 +858,9 @@ async def run_bot():
         # لود داده‌های کاربر
         load_user_data()
         
+        # ثبت هندلرها
+        await register_handlers()
+        
         # شروع تسک‌های پس‌زمینه
         asyncio.create_task(process_scheduled_tasks())
         asyncio.create_task(process_task_queue())
@@ -874,7 +869,7 @@ async def run_bot():
         logger.info("✅ Bot started successfully!")
         
         # نگه داشتن بات فعال
-        await asyncio.sleep(86400)  # 24 hours
+        await idle()
         
     except Exception as e:
         logger.error(f"Error starting bot: {e}")
@@ -882,6 +877,11 @@ async def run_bot():
         if app:
             await app.stop()
         logger.info("Bot stopped")
+
+async def idle():
+    """نگه داشتن بات فعال"""
+    while True:
+        await asyncio.sleep(3600)  # Sleep for 1 hour
 
 if __name__ == "__main__":
     web_app = Flask(__name__)
