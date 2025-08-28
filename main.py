@@ -45,6 +45,7 @@ class Config:
     ZIP_BASE_TIMEOUT = 1800  # 30 minutes base timeout
     ZIP_TIMEOUT_PER_GB = 900  # 15 minutes per additional GB
     MEMORY_LIMIT = 450 * 1024 * 1024  # 450MB حداکثر استفاده از حافظه
+    STREAMING_CHUNK_SIZE = 4 * 1024 * 1024  # 4MB برای فشرده سازی جریانی
 
 # ===== لاگ پیشرفته =====
 logging.basicConfig(
@@ -384,13 +385,13 @@ def calculate_zip_timeout(total_size_mb: float) -> int:
     logger.info(f"Calculated zip timeout: {total_timeout/60:.1f} minutes for {total_size_mb:.1f}MB")
     return int(total_timeout)
 
-def zip_creation_task(zip_path: str, files: List[Dict], password: Optional[str], progress_queue: queue.Queue) -> bool:
-    """تابع فشرده‌سازی با ردیابی پیشرفت"""
+def zip_creation_task_streaming(zip_path: str, files: List[Dict], password: Optional[str], progress_queue: queue.Queue) -> bool:
+    """تابع فشرده‌سازی با استفاده از روش جریانی برای مصرف حافظه کمتر"""
     try:
         total_size = sum(f['size'] for f in files)
         processed_size = 0
         
-        logger.info(f"Starting zip creation for {len(files)} files, total size: {total_size/1024/1024:.1f}MB")
+        logger.info(f"Starting streaming zip creation for {len(files)} files, total size: {total_size/1024/1024:.1f}MB")
         
         # بررسی وجود همه فایل‌ها
         for file_info in files:
@@ -430,13 +431,19 @@ def zip_creation_task(zip_path: str, files: List[Dict], password: Optional[str],
                     continue
                 
                 try:
-                    # اضافه کردن فایل به زیپ
-                    zipf.write(file_path, arcname)
-                    processed_size += file_info['size']
+                    # اضافه کردن فایل به زیپ به صورت جریانی
+                    with open(file_path, 'rb') as f:
+                        with zipf.open(arcname, 'w') as zf:
+                            while True:
+                                chunk = f.read(Config.STREAMING_CHUNK_SIZE)
+                                if not chunk:
+                                    break
+                                zf.write(chunk)
+                                processed_size += len(chunk)
+                                progress_queue.put((processed_size, total_size))
+                                logger.debug(f"Added chunk of {len(chunk)} bytes from {arcname}, progress: {processed_size}/{total_size}")
                     
-                    # ارسال پیشرفت به صف
-                    progress_queue.put((processed_size, total_size))
-                    logger.debug(f"Added {arcname} to zip, progress: {processed_size}/{total_size}")
+                    logger.info(f"Successfully added {arcname} to zip")
                     
                 except Exception as e:
                     logger.error(f"Error adding file {arcname} to zip: {e}")
@@ -522,11 +529,11 @@ async def create_zip_part_advanced(zip_path: str, files: List[Dict], default_pas
             # استفاده از ThreadPoolExecutor برای فشرده سازی در background
             loop = asyncio.get_event_loop()
             
-            # اجرای فشرده سازی با timeout
+            # اجرای فشرده سازی با timeout - استفاده از نسخه جریانی
             success = await asyncio.wait_for(
                 loop.run_in_executor(
                     zip_executor, 
-                    zip_creation_task, 
+                    zip_creation_task_streaming, 
                     zip_path, files, default_password, progress_tracker.zip_progress_queue
                 ),
                 timeout=dynamic_timeout
@@ -588,6 +595,13 @@ async def upload_large_file(file_path: str, chat_id: int, caption: str, reply_to
                     wait_time = random.uniform(5, 15)  # کاهش تاخیر
                     logger.info(f"Upload retry {attempt + 1}/{max_retries} after {wait_time:.1f} seconds")
                     await asyncio.sleep(wait_time)
+                
+                # ارسال فایل با مدیریت بهتر FloodWait
+                file_size = os.path.getsize(file_path)
+                
+                # برای فایل‌های بزرگ، از تکنیک ارسال تدریجی استفاده می‌کنیم
+                if file_size > 100 * 1024 * 1024:  # برای فایل‌های بزرگتر از 100MB
+                    await asyncio.sleep(2)  # تاخیر بیشتر برای فایل‌های بزرگ
                 
                 await app.send_document(
                     chat_id=chat_id,
