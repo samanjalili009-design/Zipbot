@@ -2,26 +2,24 @@ import os
 import zipfile
 import asyncio
 import logging
+import pyzipper
 from datetime import datetime
-from typing import Optional
-
 from telethon import TelegramClient, events
-from telethon.tl.types import Document, Message
-from telethon.tl.functions.upload import GetFileRequest
 from telethon.tl.types import InputFileBig
+from telethon.sessions import StringSession
+from flask import Flask
 
 # تنظیمات لاگ
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# اطلاعات API
-API_ID = 26180086
-API_HASH = "d91e174c7faf0e5a6a3a2ecb0b3361f6"
-SESSION_STRING = "BAGPefYAEAaXaj52wzDLPF0RSfWtF_Slk8nFWzYAHS9vu-HBxRUz9yLnq7m8z-ajYCQxQZO-5aNX0he9OttDjmjieYDMbDjBJtbsOT2ZwsQNe8UCAo5oFPveD5V1H0cIBMlXCG1P49G2oonf1YL1r16Nt34AJLkmzDIoFD0hhxwVBXvrUGwZmEoTtdkfORCYUMGACKO4-Al-NH35oVCkTIqmXQ5DUp9PVx6DND243VW5Xcqay7qwrwfoS4sWRA-7TMXykbHa37ZsdcCOf0VS8e6PyaYvG5BjMCd9BGRnR9IImrksYY2uBM2Bg42MLaa1WFxQtn97p5ViPF9c1MpY49bc5Gm5lwAAAAF--TK5AA"
-ALLOWED_USER_IDS = [417536686]
-
-# رمز عبور برای فایل زیپ
-ZIP_PASSWORD = "YourPassword123"  # این را تغییر دهید
+# اطلاعات API - از متغیرهای محیطی بخوان
+API_ID = int(os.environ.get('API_ID', 26180086))
+API_HASH = os.environ.get('API_HASH', "d91e174c7faf0e5a6a3a2ecb0b3361f6")
+SESSION_STRING = os.environ.get('SESSION_STRING', "YOUR_SESSION_STRING")
+ALLOWED_USER_IDS = [int(x) for x in os.environ.get('ALLOWED_USER_IDS', '417536686').split(',')]
+ZIP_PASSWORD = os.environ.get('ZIP_PASSWORD', "DefaultPassword123!")
+PORT = int(os.environ.get('PORT', 5000))
 
 # ایجاد دایرکتوری موقت
 TEMP_DIR = "temp_files"
@@ -33,6 +31,13 @@ client = TelegramClient(
     api_id=API_ID,
     api_hash=API_HASH
 )
+
+# ایجاد اپلیکیشن Flask برای render.com
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "🤖 Telegram Zip Bot is Running!"
 
 # دیکشنری برای ذخیره اطلاعات پیشرفت
 progress_data = {}
@@ -98,7 +103,20 @@ async def download_file_with_progress(event, file_path):
 
 async def zip_file_with_password(input_path, output_path, password):
     """فشرده سازی فایل با پسورد"""
-    with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(
+        None,
+        lambda: _sync_zip_with_password(input_path, output_path, password)
+    )
+
+def _sync_zip_with_password(input_path, output_path, password):
+    """تابع همزمان برای فشرده‌سازی با pyzipper"""
+    with pyzipper.AESZipFile(
+        output_path, 
+        'w', 
+        compression=pyzipper.ZIP_DEFLATED, 
+        encryption=pyzipper.WZ_AES
+    ) as zipf:
         zipf.setpassword(password.encode())
         zipf.write(input_path, os.path.basename(input_path))
 
@@ -107,9 +125,10 @@ async def upload_file_with_progress(event, file_path, caption=""):
     user_id = event.sender_id
     message = await event.reply("📤 در حال آپلود فایل... (0%)")
     
+    file_size = os.path.getsize(file_path)
     progress_data[user_id] = {
         "uploaded": 0,
-        "total_size": os.path.getsize(file_path),
+        "total_size": file_size,
         "last_update": datetime.now(),
         "message": message
     }
@@ -180,10 +199,7 @@ async def handle_message(event):
         zip_file = os.path.join(user_dir, f"compressed_{timestamp}.zip")
         await event.reply("🔒 در حال فشرده سازی فایل با پسورد...")
         
-        await asyncio.get_event_loop().run_in_executor(
-            None, 
-            lambda: zip_file_with_password(downloaded_file, zip_file, ZIP_PASSWORD)
-        )
+        await zip_file_with_password(downloaded_file, zip_file, ZIP_PASSWORD)
         
         await event.reply("✅ فشرده سازی کامل شد!")
         
@@ -214,12 +230,23 @@ async def start_command(event):
         f"پسورد فعلی: {ZIP_PASSWORD}"
     )
 
-async def main():
-    """تابع اصلی"""
+async def run_bot():
+    """اجرای ربات تلگرام"""
     await client.start()
-    logger.info("ربات شروع به کار کرد...")
+    logger.info("🤖 ربات تلگرام شروع به کار کرد...")
     await client.run_until_disconnected()
 
+def run_flask():
+    """اجرای سرور Flask برای render.com"""
+    app.run(host='0.0.0.0', port=PORT)
+
 if __name__ == '__main__':
-    # برای اجرا در render.com
-    asyncio.run(main())
+    # اجرای همزمان Flask و Telegram Bot
+    import threading
+    
+    # اجرای Flask در یک thread جداگانه
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    
+    # اجرای ربات تلگرام در thread اصلی
+    asyncio.run(run_bot())
