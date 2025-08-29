@@ -22,7 +22,6 @@ from concurrent.futures import ThreadPoolExecutor
 import queue
 import re
 import gc
-import psutil
 
 # ===== تنظیمات تضمینی =====
 class Config:
@@ -78,15 +77,13 @@ class ResourceManager:
     
     @staticmethod
     def get_memory_usage():
-        try:
-            process = psutil.Process()
-            return process.memory_info().rss
-        except:
-            return 0
+        """شبیه‌سازی مصرف حافظه - بدون psutil"""
+        return 0  # مقدار ثابت برمی‌گرداند
     
     @staticmethod
     def is_memory_ok():
-        return ResourceManager.get_memory_usage() < Config.MEMORY_LIMIT
+        """همیشه True برمی‌گرداند - بدون بررسی حافظه"""
+        return True
 
 # ===== کلاینت Pyrogram =====
 app = None
@@ -105,6 +102,7 @@ class SimpleProgress:
         self.total = 0
         self.stage = ""
         self.message = None
+        self.last_update = 0
     
     async def update(self, current: int, total: int):
         self.current = current
@@ -113,17 +111,20 @@ class SimpleProgress:
         if total == 0:
             return
             
+        # فقط هر 10 ثانیه آپدیت کن
+        now = time.time()
+        if now - self.last_update < 10:
+            return
+            
+        self.last_update = now
         percent = (current / total) * 100
-        elapsed = time.time() - self.start_time if hasattr(self, 'start_time') else 0
-        speed = current / elapsed if elapsed > 0 else 0
         
-        if self.message and current % (50 * 1024 * 1024) < Config.STREAMING_CHUNK_SIZE:  # هر 50MB
+        if self.message:
             try:
                 text = (
                     f"⏳ {self.stage}\n"
                     f"📊 {self.format_size(current)}/{self.format_size(total)}\n"
-                    f"📈 {percent:.1f}%\n"
-                    f"⚡ {self.format_size(speed)}/s"
+                    f"📈 {percent:.1f}%"
                 )
                 await self.message.edit_text(text)
             except:
@@ -151,23 +152,28 @@ def load_user_data():
         if os.path.exists(Config.DATA_FILE):
             with open(Config.DATA_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                user_files = data.get('user_files', {})
-                user_states = data.get('user_states', {})
+                user_files = {int(k): v for k, v in data.get('user_files', {}).items()}
+                user_states = {int(k): v for k, v in data.get('user_states', {}).items()}
     except:
-        pass
+        user_files = {}
+        user_states = {}
 
 def save_user_data():
     try:
-        data = {'user_files': user_files, 'user_states': user_states}
+        data = {
+            'user_files': {str(k): v for k, v in user_files.items()},
+            'user_states': {str(k): v for k, v in user_states.items()}
+        }
         with open(Config.DATA_FILE, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False)
-    except:
-        pass
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Error saving data: {e}")
 
 async def send_message(chat_id, text, reply_id=None):
     try:
         return await app.send_message(chat_id, text, reply_to_message_id=reply_id)
-    except:
+    except Exception as e:
+        logger.error(f"Error sending message: {e}")
         return None
 
 async def download_file(message, file_path):
@@ -185,9 +191,11 @@ async def download_file(message, file_path):
         
         return os.path.exists(file_path) and os.path.getsize(file_path) > 0
     except FloodWait as e:
-        await asyncio.sleep(e.value)
+        logger.warning(f"FloodWait: {e.value} seconds")
+        await asyncio.sleep(e.value + 2)
         return False
-    except:
+    except Exception as e:
+        logger.error(f"Download error: {e}")
         return False
 
 def create_zip_safe(zip_path, files, password):
@@ -218,12 +226,13 @@ def create_zip_safe(zip_path, files, password):
                             zf.write(chunk)
                             processed += len(chunk)
                             
-                            # پاک‌سازی هر 100MB
-                            if processed % (100 * 1024 * 1024) < Config.STREAMING_CHUNK_SIZE:
+                            # پاک‌سازی هر 50MB
+                            if processed % (50 * 1024 * 1024) < Config.STREAMING_CHUNK_SIZE:
                                 gc.collect()
         
         return True
-    except:
+    except Exception as e:
+        logger.error(f"Zip creation error: {e}")
         return False
 
 async def upload_file(file_path, chat_id, caption, reply_id):
@@ -276,9 +285,11 @@ async def upload_file(file_path, chat_id, caption, reply_id):
         
         return True
     except FloodWait as e:
-        await asyncio.sleep(e.value)
+        logger.warning(f"Upload FloodWait: {e.value} seconds")
+        await asyncio.sleep(e.value + 3)
         return False
-    except:
+    except Exception as e:
+        logger.error(f"Upload error: {e}")
         return False
 
 # ===== هندلرها =====
@@ -342,7 +353,7 @@ async def start_zip_process(client, message: Message):
     user_states[user_id] = "processing"
     await send_message(message.chat.id, "⏳ شروع پردازش...", message.id)
     
-    # اضافه به صفر
+    # اضافه به صف
     task_queue.append((process_files, user_id, message.chat.id, message.id))
     
 async def process_files(user_id, chat_id, message_id):
@@ -361,7 +372,7 @@ async def process_files(user_id, chat_id, message_id):
                 if not file_msg:
                     continue
                     
-                file_path = f"/tmp/{file_data['file_name']}"
+                file_path = os.path.join(tempfile.gettempdir(), f"temp_{user_id}_{file_data['file_name']}")
                 temp_files.append(file_path)
                 
                 if await download_file(file_msg, file_path):
@@ -385,7 +396,7 @@ async def process_files(user_id, chat_id, message_id):
         await processing_msg.edit_text("📦 در حال ایجاد زیپ...")
         
         zip_name = f"archive_{int(time.time())}"
-        zip_path = f"/tmp/{zip_name}.zip"
+        zip_path = os.path.join(tempfile.gettempdir(), f"zip_{user_id}_{zip_name}.zip")
         temp_files.append(zip_path)
         
         # ایجاد زیپ
@@ -418,7 +429,10 @@ async def process_files(user_id, chat_id, message_id):
     except Exception as e:
         logger.error(f"Process error: {e}")
         if processing_msg:
-            await processing_msg.edit_text("❌ خطا در پردازش")
+            try:
+                await processing_msg.edit_text("❌ خطا در پردازش")
+            except:
+                pass
     finally:
         # پاک‌سازی
         for file_path in temp_files:
@@ -440,9 +454,13 @@ async def process_files(user_id, chat_id, message_id):
 async def process_queue():
     while True:
         if task_queue:
-            task = task_queue.popleft()
-            await task[0](*task[1:])
-            await asyncio.sleep(5)
+            try:
+                task = task_queue.popleft()
+                await task[0](*task[1:])
+                await asyncio.sleep(3)
+            except Exception as e:
+                logger.error(f"Queue task error: {e}")
+                await asyncio.sleep(5)
         else:
             await asyncio.sleep(2)
 
@@ -451,6 +469,7 @@ async def run_bot():
     global app
     
     load_user_data()
+    logger.info("🤖 Starting Large Files Bot...")
     
     app = Client(
         "user_bot",
@@ -481,27 +500,32 @@ async def run_bot():
     
     await asyncio.Event().wait()
 
-# ===== وب سرور =====
+# ===== وب سرور ساده =====
 web_app = Flask(__name__)
 
 @web_app.route('/')
 def home():
     return "🤖 Large Files Bot - Running", 200
 
-def run_web():
-    web_app.run(host="0.0.0.0", port=10000, debug=False)
+@web_app.route('/health')
+def health():
+    return {"status": "healthy", "timestamp": time.time()}, 200
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 10000))
+    web_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 if __name__ == "__main__":
-    # راه‌اندازی وب در ترد جداگانه
-    web_thread = threading.Thread(target=run_web, daemon=True)
+    # راه‌اندازی وب سرور در ترد جداگانه
+    web_thread = threading.Thread(target=run_web_server, daemon=True)
     web_thread.start()
     
     # راه‌اندازی ربات
     try:
         asyncio.run(run_bot())
     except KeyboardInterrupt:
-        logger.info("Bot stopped")
+        logger.info("Bot stopped by user")
         save_user_data()
     except Exception as e:
-        logger.error(f"Bot failed: {e}")
+        logger.error(f"Bot failed to start: {e}")
         save_user_data()
