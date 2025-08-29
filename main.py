@@ -22,6 +22,7 @@ from datetime import datetime
 import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import queue
+import re
 
 # ===== تنظیمات پیشرفته =====
 class Config:
@@ -792,67 +793,6 @@ async def cleanup_files(file_paths: List[str]):
         except Exception as e:
             logger.error(f"Error cleaning up file {file_path}: {e}")
 
-# ===== هندلر جدید برای دستور /size =====
-async def handle_size_command(client, message: Message):
-    if not is_user_allowed(message.from_user.id):
-        return
-    
-    user_id = message.from_user.id
-    
-    if user_states.get(user_id) != "ready_to_zip":
-        await message.reply("❌ ابتدا باید مراحل قبلی را کامل کنید. از /zip شروع کنید.")
-        return
-    
-    try:
-        # استخراج سایز از پیام
-        command_parts = message.text.split()
-        if len(command_parts) < 2:
-            await message.reply(
-                "❌ فرمت دستور نادرست است\n\n"
-                "✅ استفاده صحیح:\n"
-                "/size 100 (برای 100 مگابایت)\n"
-                "/size 200 (برای 200 مگابایت)\n" 
-                "/size 500 (برای 500 مگابایت)\n"
-                "/size 1024 (برای 1 گیگابایت)"
-            )
-            return
-        
-        size_mb = int(command_parts[1])
-        valid_sizes = [100, 200, 500, 1024]
-        
-        if size_mb not in valid_sizes:
-            await message.reply(
-                f"❌ سایز نامعتبر\n\n"
-                f"✅ سایزهای مجاز: {', '.join(str(s) for s in valid_sizes)}\n"
-                f"مثال: /size 200"
-            )
-            return
-        
-        user_states[f"{user_id}_upload_size"] = size_mb * 1024 * 1024
-        zip_name = user_states.get(f"{user_id}_zipname", f"archive_{int(time.time())}")
-        
-        await message.reply(
-            f"✅ **سایز آپلود انتخاب شد: {size_mb}MB**\n\n"
-            f"📦 عملیات زیپ و آپلود شروع می‌شود...\n"
-            f"⏳ لطفاً منتظر بمانید"
-        )
-        
-        # اضافه کردن به صف پردازش
-        add_to_queue(process_zip_files, user_id, zip_name, message.chat.id, message.id)
-        
-    except ValueError:
-        await message.reply(
-            "❌ سایز باید عدد باشد\n\n"
-            "✅ استفاده صحیح:\n"
-            "/size 100 (برای 100 مگابایت)\n"
-            "/size 200 (برای 200 مگابایت)\n"
-            "/size 500 (برای 500 مگابایت)\n"
-            "/size 1024 (برای 1 گیگابایت)"
-        )
-    except Exception as e:
-        logger.error(f"Error in size command: {e}")
-        await message.reply("❌ خطایی رخ داد. لطفاً دوباره تلاش کنید.")
-
 # ===== هندلرها =====
 async def start(client, message: Message):
     if not is_user_allowed(message.from_user.id):
@@ -1013,21 +953,15 @@ async def start_zip_now(client, message: Message):
     
     zip_name = user_states.get(f"{user_id}_zipname", f"archive_{int(time.time())}")
     
-    # نمایش گزینه‌های سایز آپلود
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("100 مگابایت", callback_data="size_100")],
-        [InlineKeyboardButton("200 مگابایت", callback_data="size_200")],
-        [InlineKeyboardButton("500 مگابایت", callback_data="size_500")],
-        [InlineKeyboardButton("1 گیگابایت", callback_data="size_1024")]
-    ])
-    
     await message.reply(
-        "📏 **لطفاً سایز آپلود را انتخاب کنید:**\n\n"
-        "🔹 فایل‌ها در پارت‌های انتخابی شما آپلود خواهند شد\n"
-        "🔹 برای فایل‌های بزرگتر، تعداد پارت‌ها کمتر خواهد بود\n\n"
-        "✅ یا از دستور /size استفاده کنید (مثال: /size 200)",
-        reply_markup=keyboard
+        f"📦 **عملیات زیپ و آپلود شروع می‌شود...**\n\n"
+        f"📝 نام فایل: `{zip_name}.zip`\n"
+        f"⏳ لطفاً منتظر بمانید",
+        parse_mode=enums.ParseMode.MARKDOWN
     )
+    
+    # اضافه کردن به صف پردازش
+    add_to_queue(process_zip_files, user_id, zip_name, message.chat.id, message.id)
 
 async def cancel_zip(client, message: Message):
     user_id = message.from_user.id
@@ -1048,6 +982,23 @@ async def cancel_zip(client, message: Message):
         "📌 می‌توانید دوباره فایل‌ها را ارسال کنید",
         reply_to_message_id=message.id
     )
+
+async def handle_done_command(client, message: Message):
+    user_id = message.from_user.id
+    
+    if user_id not in user_states:
+        await message.reply("❌ هیچ فرآیندی در حال انجام نیست")
+        return
+    
+    if user_states.get(user_id) == "waiting_password":
+        await message.reply("❌ لطفاً ابتدا رمز عبور را وارد کنید")
+        return
+    
+    if user_states.get(user_id) == "waiting_filename":
+        await message.reply("❌ لطفاً ابتدا نام فایل را وارد کنید")
+        return
+    
+    await message.reply("✅ دستور /done دریافت شد")
 
 async def process_zip(client, message: Message):
     user_id = message.from_user.id
@@ -1101,23 +1052,6 @@ async def process_zip(client, message: Message):
             parse_mode=enums.ParseMode.MARKDOWN
         )
 
-async def handle_done_command(client, message: Message):
-    user_id = message.from_user.id
-    
-    if user_id not in user_states:
-        await message.reply("❌ هیچ فرآیندی در حال انجام نیست")
-        return
-    
-    if user_states.get(user_id) == "waiting_password":
-        await message.reply("❌ لطفاً ابتدا رمز عبور را وارد کنید")
-        return
-    
-    if user_states.get(user_id) == "waiting_filename":
-        await message.reply("❌ لطفاً ابتدا نام فایل را وارد کنید")
-        return
-    
-    await message.reply("✅ دستور /done دریافت شد")
-
 async def handle_callback_query(client, callback_query):
     user_id = callback_query.from_user.id
     data = callback_query.data
@@ -1146,10 +1080,9 @@ async def handle_callback_query(client, callback_query):
             "2. رمزگذاری: در کپشن از `pass=رمز` استفاده کنید\n"
             "3. شروع زیپ: پس از ارسال همه فایل‌ها، /zip را بزنید\n"
             "4. تنظیمات: رمز کلی و نام فایل را وارد کنید\n"
-            "5. انتخاب سایز: سایز آپلود را انتخاب کنید\n"
-            "6. دریافت: ربات فایل‌ها را زیپ و آپلود می‌کند\n\n"
+            "5. دریافت: ربات فایل‌ها را زیپ و آپلود می‌کند\n\n"
             "⚙️ **ویژگی‌های پیشرفته:**\n"
-            "• تقسیم خودکار به پارت‌های قابل تنظیم\n"
+            "• فشرده‌سازی یکجا همه فایل‌ها\n"
             "• آپلود تکه تکه فایل‌های بزرگ\n"
             "• رمزگذاری AES-256\n"
             "• بازیابی از خطا\n\n"
@@ -1169,27 +1102,6 @@ async def handle_callback_query(client, callback_query):
             f"💡 پیشنهاد: {suggested_name}\n"
             f"⚠️ توجه: پسوند .zip اضافه خواهد شد"
         )
-    
-    elif data.startswith("size_"):
-        size_mb = int(data.split("_")[1])
-        user_states[f"{user_id}_upload_size"] = size_mb * 1024 * 1024
-        
-        zip_name = user_states.get(f"{user_id}_zipname", f"archive_{int(time.time())}")
-        
-        await callback_query.answer(f"سایز {size_mb}MB انتخاب شد")
-        await callback_query.message.edit_text(
-            f"✅ **سایز آپلود انتخاب شد: {size_mb}MB**\n\n"
-            f"📦 عملیات زیپ و آپلود شروع می‌شود...\n"
-            f"⏳ لطفاً منتظر بمانید"
-        )
-        
-        # اضافه کردن به صف پردازش
-        add_to_queue(process_zip_files, user_id, zip_name, callback_query.message.chat.id, callback_query.message.id)
-    
-    elif data == "confirm_zip":
-        await callback_query.answer("پردازش شروع شد...")
-        zip_name = user_states.get(f"{user_id}_zipname", f"archive_{int(time.time())}")
-        add_to_queue(process_zip_files, user_id, zip_name, callback_query.message.chat.id, callback_query.message.id)
     
     elif data == "cancel_zip":
         await callback_query.answer("عملیات لغو شد")
@@ -1213,10 +1125,6 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
     try:
         processing_msg = await app.send_message(chat_id, "⏳ **در حال آماده‌سازی...**\n\n🌀 لطفاً منتظر بمانید", parse_mode=enums.ParseMode.MARKDOWN)
         zip_password = user_states.get(f"{user_id}_password")
-        
-        # دریافت سایز آپلود از کاربر یا استفاده از پیش‌فرض
-        upload_size = user_states.get(f"{user_id}_upload_size", Config.UPLOAD_PART_SIZE)
-        Config.UPLOAD_PART_SIZE = upload_size
         
         zip_progress_task = asyncio.create_task(progress_tracker.update_zip_progress())
         
@@ -1272,133 +1180,89 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
             await processing_msg.edit_text("❌ **هیچ فایلی با موفقیت دانلود نشد**\n\nلطفاً دوباره تلاش کنید")
             return
         
-        await processing_msg.edit_text("📦 **در حال ایجاد پارت‌ها...**\n\n⏳ لطفاً منتظر بمانید", parse_mode=enums.ParseMode.MARKDOWN)
+        await processing_msg.edit_text("📦 **در حال فشرده‌سازی همه فایل‌ها...**\n\n⏳ لطفاً منتظر بمانید", parse_mode=enums.ParseMode.MARKDOWN)
         
-        file_info_list.sort(key=lambda x: x['size'], reverse=True)
+        # ایجاد یک فایل ZIP واحد برای همه فایل‌ها
+        final_zip_name = f"{zip_name}.zip"
+        zip_path = os.path.join(tempfile.gettempdir(), f"zip_bot_{user_id}_{final_zip_name}")
         
-        parts = []
-        current_part = []
-        current_size = 0
+        total_size = sum(f['size'] for f in file_info_list)
+        progress_tracker.reset(processing_msg, "فشرده‌سازی", final_zip_name, 1, 1)
+        progress_tracker.total = total_size
         
-        for file_info in file_info_list:
-            file_size = file_info['size']
+        success = await create_zip_part_advanced(zip_path, file_info_list, zip_password)
+        if not success:
+            logger.error(f"Failed to create zip file")
+            try:
+                if os.path.exists(zip_path):
+                    os.remove(zip_path)
+            except:
+                pass
             
-            if file_size > upload_size * 0.9:  # اگر فایل بزرگتر از 90% سایز آپلود باشد
-                if current_part:
-                    parts.append(current_part)
-                    current_part = []
-                    current_size = 0
-                parts.append([file_info])
-                logger.info(f"Large file in separate part: {file_info['name']} ({file_size/1024/1024:.1f}MB)")
-            else:
-                if current_size + file_size > upload_size:
-                    if current_part:
-                        parts.append(current_part)
-                        current_part = []
-                        current_size = 0
-                
-                current_part.append(file_info)
-                current_size += file_size
-        
-        if current_part:
-            parts.append(current_part)
-        
-        num_parts = len(parts)
-        logger.info(f"Created {num_parts} parts from {len(file_info_list)} files, upload size: {upload_size/1024/1024:.1f}MB")
-        
-        if num_parts == 0:
-            await processing_msg.edit_text("❌ **هیچ پارتی ایجاد نشد**\n\nلطفاً دوباره تلاش کنید")
+            await processing_msg.edit_text("❌ **خطا در ایجاد فایل زیپ**\n\nلطفاً دوباره تلاش کنید")
             return
         
-        successful_parts = 0
+        # قبل از آپلود، مطمئن شویم فایل زیپ وجود دارد و خالی نیست
+        if not os.path.exists(zip_path) or os.path.getsize(zip_path) == 0:
+            logger.error(f"Zip file is missing or empty: {zip_path}")
+            await processing_msg.edit_text("❌ **فایل زیپ ایجاد شده خالی است**\n\nلطفاً دوباره تلاش کنید")
+            return
         
-        for part_index, part_files in enumerate(parts):
-            part_number = part_index + 1
-            part_zip_name = f"{zip_name}_part{part_number}.zip"
-            zip_path = os.path.join(tempfile.gettempdir(), f"zip_bot_{user_id}_{part_zip_name}")
-            
-            part_password = zip_password
-            part_size_mb = sum(f['size'] for f in part_files) / (1024 * 1024)
-            
-            logger.info(f"Processing part {part_number}/{num_parts}, "
-                       f"files: {len(part_files)}, size: {part_size_mb:.1f}MB")
-            
-            await processing_msg.edit_text(
-                f"🗜️ **در حال فشرده‌سازی پارت {part_number}/{num_parts}**\n\n"
-                f"📝 شامل {len(part_files)} فایل\n"
-                f"💾 حجم: {part_size_mb:.1f}MB\n"
-                f"⏳ لطفاً منتظر بمانید...",
-                parse_mode=enums.ParseMode.MARKDOWN
-            )
-            
-            total_part_size = sum(f['size'] for f in part_files)
-            progress_tracker.reset(processing_msg, "فشرده‌سازی", f"پارت {part_number}", part_number, num_parts)
-            progress_tracker.total = total_part_size
-            
-            success = await create_zip_part_advanced(zip_path, part_files, part_password)
-            if not success:
-                logger.error(f"Failed to create zip part {part_number}")
-                try:
-                    if os.path.exists(zip_path):
-                        os.remove(zip_path)
-                except:
-                    pass
-                continue
-            
-            # قبل از آپلود، مطمئن شویم فایل زیپ وجود دارد و خالی نیست
-            if not os.path.exists(zip_path) or os.path.getsize(zip_path) == 0:
-                logger.error(f"Zip file is missing or empty: {zip_path}")
-                continue
-            
-            upload_success = await upload_zip_part(
-                zip_path, 
-                part_index, 
-                num_parts, 
-                chat_id, 
-                message_id, 
-                part_password or "بدون رمز",
-                processing_msg
-            )
-            
-            # حذف فایل زیپ فقط بعد از آپلود موفق
-            if upload_success:
-                try:
-                    if os.path.exists(zip_path):
-                        os.remove(zip_path)
-                        logger.info(f"Cleaned up zip part: {zip_path}")
-                except Exception as e:
-                    logger.error(f"Error cleaning up zip part {zip_path}: {e}")
-            
-            if upload_success:
-                successful_parts += 1
-                logger.info(f"Part {part_number} processed successfully")
-            else:
-                logger.error(f"Failed to upload part {part_number}")
-            
-            await asyncio.sleep(1)
+        # آپلود فایل زیپ
+        zip_size = os.path.getsize(zip_path)
+        await processing_msg.edit_text(
+            f"📤 **در حال آپلود فایل زیپ...**\n\n"
+            f"📝 نام: `{final_zip_name}`\n"
+            f"💾 حجم: `{progress_tracker.format_size(zip_size)}`\n"
+            f"🔑 رمز: `{zip_password or 'بدون رمز'}`\n"
+            f"⏳ لطفاً منتظر بمانید...",
+            parse_mode=enums.ParseMode.MARKDOWN
+        )
         
-        # حذف فایل‌های دانلود شده فقط بعد از آپلود موفق همه پارت‌ها
-        if successful_parts == num_parts:
+        progress_tracker.reset(processing_msg, "آپلود", final_zip_name, 1, 1)
+        
+        upload_success = await upload_large_file_chunked(
+            file_path=zip_path,
+            chat_id=chat_id,
+            caption=(
+                f"📦 فایل زیپ شده\n"
+                f"🔑 رمز: `{zip_password or 'بدون رمز'}`\n"
+                f"💾 حجم: {progress_tracker.format_size(zip_size)}"
+            ),
+            reply_to_message_id=message_id,
+            progress_callback=progress_tracker.update_upload_progress,
+            progress_args=()
+        )
+        
+        # حذف فایل زیپ فقط بعد از آپلود موفق
+        if upload_success:
+            try:
+                if os.path.exists(zip_path):
+                    os.remove(zip_path)
+                    logger.info(f"Cleaned up zip file: {zip_path}")
+            except Exception as e:
+                logger.error(f"Error cleaning up zip file {zip_path}: {e}")
+        
+        # حذف فایل‌های دانلود شده فقط بعد از آپلود موفق
+        if upload_success:
             await cleanup_files(temp_downloaded_files)
         else:
-            logger.warning("Not all parts uploaded successfully, keeping downloaded files for retry")
+            logger.warning("Upload failed, keeping downloaded files for retry")
         
-        if successful_parts > 0:
+        if upload_success:
             result_text = (
                 f"✅ **عملیات با موفقیت تکمیل شد!**\n\n"
-                f"📦 پارت‌های ایجاد شده: `{successful_parts}/{num_parts}`\n"
-                f"🔑 رمز اصلی: `{zip_password or 'بدون رمز'}`\n"
-                f"📏 سایز آپلود: `{upload_size/1024/1024:.0f}MB`\n\n"
-                f"📌 **نکات مهم:**\n"
-                f"• برای extract همه پارت‌ها را دانلود کنید\n"
-                f"• از رمز یکسان برای همه پارت‌ها استفاده کنید\n"
-                f"• فایل‌ها به طور خودکار حذف شدند"
+                f"📦 فایل زیپ ایجاد شده: `{final_zip_name}`\n"
+                f"🔑 رمز: `{zip_password or 'بدون رمز'}`\n"
+                f"📊 تعداد فایل‌ها: `{len(file_info_list)}`\n"
+                f"💾 حجم نهایی: `{progress_tracker.format_size(zip_size)}`\n\n"
+                f"📌 فایل‌ها به طور خودکار حذف شدند"
             )
         else:
             result_text = (
-                "❌ **خطا در ایجاد پارت‌ها**\n\n"
-                "📌 ممکن است فایل‌ها خراب شده باشند یا حجم بسیار زیاد باشد\n"
-                "🔄 لطفاً دوباره فایل‌ها را ارسال کنید و تلاش کنید"
+                "❌ **خطا در آپلود فایل زیپ**\n\n"
+                "📌 ممکن است حجم فایل بسیار زیاد باشد\n"
+                "🔄 لطفاً دوباره تلاش کنید"
             )
         
         await safe_send_message(
@@ -1456,9 +1320,7 @@ async def run_bot():
         in_memory=True
     )
     
-    # ثبت همه هندلرها
     app.on_message(filters.command("start"))(start)
-    app.on_message(filters.command("size"))(handle_size_command)  # اضافه کردن هندلر جدید
     app.on_message(filters.document | filters.video | filters.audio)(handle_file)
     app.on_message(filters.command("zip"))(start_zip)
     app.on_message(filters.command("zipnow"))(start_zip_now)
