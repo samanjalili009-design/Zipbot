@@ -5,22 +5,26 @@ import pyzipper
 import logging
 import sys
 import asyncio
+import aiohttp
 import aiofiles
 from pyrogram import Client, filters, enums
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.errors import FloodWait, RPCError
+from pyrogram.errors import FloodWait, RPCError, SessionPasswordNeeded
+from flask import Flask
+import threading
 from collections import deque
+import random
 import math
-from typing import Dict, List, Callable, Any, Optional
+from typing import Dict, List, Callable, Any, Tuple, Optional
 from pathlib import Path
 import json
 from datetime import datetime
 import shutil
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import queue
 import re
 
-# ===== تنظیمات =====
+# ===== تنظیمات پیشرفته =====
 class Config:
     API_ID = 1867911
     API_HASH = "f9e86b274826212a2712b18754fabc47"
@@ -28,14 +32,14 @@ class Config:
     ALLOWED_USER_IDS = [417536686]
     MAX_FILE_SIZE = 2147483648  # 2GB
     MAX_TOTAL_SIZE = 4294967296  # 4GB
-    DEFAULT_PART_SIZE = 100 * 1024 * 1024  # 100MB
+    PART_SIZE = 400 * 1024 * 1024  # 400MB (پیش فرض)
     CHUNK_SIZE = 512 * 1024  # 512KB
     MAX_CONCURRENT_DOWNLOADS = 1
     MAX_CONCURRENT_UPLOADS = 1
     RETRY_DELAY = 10
     PROGRESS_UPDATE_INTERVAL = 1.0
     DATA_FILE = "user_data.json"
-    UPLOAD_CHUNK_SIZE = 2 * 1024 * 1024  # 2MB
+    UPLOAD_CHUNK_SIZE = 2 * 1024 * 1024  # 2MB برای آپلود
     MAX_UPLOAD_RETRIES = 3
     ZIP_COMPRESSION_LEVEL = 3
     MAX_ZIP_RETRIES = 2
@@ -43,8 +47,9 @@ class Config:
     ZIP_TIMEOUT_PER_GB = 900
     MEMORY_LIMIT = 450 * 1024 * 1024
     STREAMING_CHUNK_SIZE = 4 * 1024 * 1024
+    UPLOAD_PART_SIZE = 400 * 1024 * 1024  # تغییر از 100MB به 400MB - اندازه هر قسمت برای آپلود
 
-# ===== لاگ =====
+# ===== لاگ پیشرفته =====
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -55,12 +60,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ===== متغیرهای سراسری =====
+# ===== کلاینت Pyrogram =====
 app = None
+
+# ===== داده‌ها و وضعیت =====
 user_files: Dict[int, List] = {}
 user_states: Dict[int, Any] = {}
 scheduled_tasks: List[Tuple[float, Callable, Tuple, Dict]] = []
 task_queue = deque()
+processing = False
 download_semaphore = asyncio.Semaphore(Config.MAX_CONCURRENT_DOWNLOADS)
 upload_semaphore = asyncio.Semaphore(Config.MAX_CONCURRENT_UPLOADS)
 zip_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ZipWorker")
@@ -81,6 +89,7 @@ class ProgressTracker:
         self.total_files = 0
         self.lock = asyncio.Lock()
         self.zip_progress_queue = queue.Queue()
+        self.upload_progress_queue = queue.Queue()
         self.is_uploading = False
 
     def reset(self, message: Message = None, stage: str = "", file_name: str = "", file_index: int = 0, total_files: int = 0):
@@ -102,9 +111,10 @@ class ProgressTracker:
             async with self.lock:
                 now = time.time()
                 
+                # برای آپلود، همیشه آپدیت کنیم حتی اگر زمان نرسیده
                 update_interval = Config.PROGRESS_UPDATE_INTERVAL
                 if self.is_uploading:
-                    update_interval = 0.3
+                    update_interval = 0.3  # آپدیت سریع‌تر برای آپلود
                 
                 if now - self.last_update < update_interval and current != total:
                     return
@@ -118,6 +128,7 @@ class ProgressTracker:
                 speed = current / elapsed if elapsed > 0 else 0
                 eta = (total - current) / speed if speed > 0 and current > 0 else 0
                 
+                # برای آپلود، همیشه آپدیت کنیم
                 if not self.is_uploading and abs(percent - self.last_percent) < 1.0 and current != total:
                     return
                 
@@ -150,10 +161,12 @@ class ProgressTracker:
                         self.last_text = progress_text
                     except Exception as e:
                         logger.error(f"Error updating progress: {e}")
+                        
         except Exception as e:
             logger.error(f"Progress update error: {e}")
 
     async def update_zip_progress(self):
+        """بروزرسانی پیشرفت فشرده‌سازی"""
         try:
             while True:
                 try:
@@ -165,6 +178,7 @@ class ProgressTracker:
             logger.error(f"Zip progress update error: {e}")
 
     async def update_upload_progress(self, current: int, total: int):
+        """بروزرسانی پیشرفت آپلود"""
         try:
             await self.update(current, total)
         except Exception as e:
@@ -195,9 +209,10 @@ class ProgressTracker:
         else:
             return f"{seconds // 3600} ساعت و {(seconds % 3600) // 60} دقیقه"
 
+# ایجاد نمونه پیشرفت
 progress_tracker = ProgressTracker()
 
-# ===== فانکشن‌های کمکی =====
+# ===== فانکشن‌های کمکی پیشرفته =====
 def is_user_allowed(user_id: int) -> bool:
     return user_id in Config.ALLOWED_USER_IDS
 
@@ -325,11 +340,14 @@ async def process_scheduled_tasks():
         await asyncio.sleep(2)
 
 async def process_task_queue():
+    global processing
+    
     while True:
         if not task_queue:
             await asyncio.sleep(2)
             continue
         
+        processing = True
         task_func, args, kwargs = task_queue.popleft()
         
         try:
@@ -357,6 +375,7 @@ async def process_task_queue():
             await asyncio.sleep(3)
         
         finally:
+            processing = False
             save_user_data()
 
 def add_to_queue(task_func: Callable, *args, **kwargs):
@@ -378,6 +397,7 @@ async def notify_user_floodwait(user_id: int, wait_time: int):
         logger.error(f"Error notifying user about floodwait: {e}")
 
 def calculate_zip_timeout(total_size_mb: float) -> int:
+    """محاسبه timeout بر اساس حجم فایل"""
     base_timeout = Config.ZIP_BASE_TIMEOUT
     additional_time = max(0, (total_size_mb - 1024) / 1024 * Config.ZIP_TIMEOUT_PER_GB)
     total_timeout = min(base_timeout + additional_time, 3 * 3600)
@@ -385,12 +405,14 @@ def calculate_zip_timeout(total_size_mb: float) -> int:
     return int(total_timeout)
 
 def zip_creation_task_streaming(zip_path: str, files: List[Dict], password: Optional[str], progress_queue: queue.Queue) -> bool:
+    """تابع فشرده‌سازی با استفاده از روش جریانی برای مصرف حافظه کمتر"""
     try:
         total_size = sum(f['size'] for f in files)
         processed_size = 0
         
         logger.info(f"Starting streaming zip creation for {len(files)} files, total size: {total_size/1024/1024:.1f}MB")
         
+        # بررسی وجود همه فایل‌ها
         for file_info in files:
             if not os.path.exists(file_info['path']):
                 logger.error(f"File not found: {file_info['path']}")
@@ -399,6 +421,7 @@ def zip_creation_task_streaming(zip_path: str, files: List[Dict], password: Opti
                 logger.error(f"File is empty: {file_info['path']}")
                 return False
         
+        # استفاده از حالت بدون فشرده‌سازی برای فایل‌های از قبل فشرده
         compression = pyzipper.ZIP_STORED if any(f['name'].lower().endswith(('.zip', '.rar', '.7z', '.tar', '.gz')) for f in files) else pyzipper.ZIP_DEFLATED
         
         with pyzipper.AESZipFile(
@@ -427,6 +450,7 @@ def zip_creation_task_streaming(zip_path: str, files: List[Dict], password: Opti
                     continue
                 
                 try:
+                    # اضافه کردن فایل به زیپ به صورت جریانی
                     with open(file_path, 'rb') as f:
                         with zipf.open(arcname, 'w') as zf:
                             while True:
@@ -444,6 +468,7 @@ def zip_creation_task_streaming(zip_path: str, files: List[Dict], password: Opti
                     logger.error(f"Error adding file {arcname} to zip: {e}")
                     continue
         
+        # بررسی نهایی فایل زیپ
         if os.path.exists(zip_path) and os.path.getsize(zip_path) > 0:
             zip_size = os.path.getsize(zip_path)
             compression_ratio = (1 - (zip_size / total_size)) * 100 if total_size > 0 else 0
@@ -451,6 +476,7 @@ def zip_creation_task_streaming(zip_path: str, files: List[Dict], password: Opti
                        f"size: {zip_size/1024/1024:.1f}MB, "
                        f"compression: {compression_ratio:.1f}%")
             
+            # اعتبارسنجی ساده
             try:
                 with pyzipper.AESZipFile(zip_path, 'r') as test_zip:
                     if password:
@@ -475,6 +501,7 @@ def zip_creation_task_streaming(zip_path: str, files: List[Dict], password: Opti
         return False
 
 async def create_zip_part_advanced(zip_path: str, files: List[Dict], default_password: Optional[str] = None) -> bool:
+    """تابع پیشرفته فشرده سازی با مدیریت خطا و timeout"""
     max_retries = Config.MAX_ZIP_RETRIES
     
     for attempt in range(max_retries):
@@ -488,6 +515,7 @@ async def create_zip_part_advanced(zip_path: str, files: List[Dict], default_pas
                 except Exception as e:
                     logger.error(f"Error removing existing zip: {e}")
             
+            # بررسی وجود فایل‌ها قبل از شروع
             missing_files = []
             empty_files = []
             for file_info in files:
@@ -506,6 +534,7 @@ async def create_zip_part_advanced(zip_path: str, files: List[Dict], default_pas
                 else:
                     return False
             
+            # محاسبه timeout بر اساس حجم
             total_size_mb = sum(f['size'] for f in files) / (1024 * 1024)
             dynamic_timeout = calculate_zip_timeout(total_size_mb)
             
@@ -565,7 +594,8 @@ async def create_zip_part_advanced(zip_path: str, files: List[Dict], default_pas
     return False
 
 async def upload_large_file_chunked(file_path: str, chat_id: int, caption: str, reply_to_message_id: int, 
-                                  progress_callback, progress_args, part_size: int) -> bool:
+                                  progress_callback, progress_args) -> bool:
+    """آپلود فایل‌های بزرگ به صورت تکه تکه"""
     max_retries = Config.MAX_UPLOAD_RETRIES
     
     for attempt in range(max_retries):
@@ -578,7 +608,8 @@ async def upload_large_file_chunked(file_path: str, chat_id: int, caption: str, 
                 
                 file_size = os.path.getsize(file_path)
                 
-                if file_size <= part_size:
+                # اگر فایل کوچک است، معمولی آپلود کن
+                if file_size <= Config.UPLOAD_PART_SIZE:
                     await app.send_document(
                         chat_id=chat_id,
                         document=file_path,
@@ -588,7 +619,8 @@ async def upload_large_file_chunked(file_path: str, chat_id: int, caption: str, 
                         progress_args=progress_args
                     )
                 else:
-                    await upload_file_in_parts(file_path, chat_id, caption, reply_to_message_id, progress_callback, progress_args, part_size)
+                    # فایل بزرگ است، باید تکه تکه آپلود شود
+                    await upload_file_in_parts(file_path, chat_id, caption, reply_to_message_id, progress_callback, progress_args)
                 
                 logger.info(f"File uploaded successfully: {file_path}")
                 return True
@@ -616,7 +648,7 @@ async def upload_large_file_chunked(file_path: str, chat_id: int, caption: str, 
             await asyncio.sleep(Config.RETRY_DELAY)
             
         except Exception as e:
-            logger.error(f"Unexpected error during upload (attempt {attempt + 1}/{max_retries}): {e}")
+            logger.error(f"Unexpected error during upload (attempt {attempt + 1}/{max_retries): {e}")
             if attempt == max_retries - 1:
                 return False
             await asyncio.sleep(Config.RETRY_DELAY)
@@ -624,12 +656,15 @@ async def upload_large_file_chunked(file_path: str, chat_id: int, caption: str, 
     return False
 
 async def upload_file_in_parts(file_path: str, chat_id: int, caption: str, reply_to_message_id: int,
-                             progress_callback, progress_args, part_size: int):
+                             progress_callback, progress_args):
+    """آپلود فایل به صورت تکه تکه"""
     file_size = os.path.getsize(file_path)
+    part_size = Config.UPLOAD_PART_SIZE
     total_parts = (file_size + part_size - 1) // part_size
     
     logger.info(f"Uploading file in {total_parts} parts, part size: {part_size/1024/1024:.1f}MB")
     
+    # ایجاد یک فایل موقت برای هر قسمت
     temp_parts = []
     
     try:
@@ -639,12 +674,14 @@ async def upload_file_in_parts(file_path: str, chat_id: int, caption: str, reply
                 if not part_data:
                     break
                     
+                # ایجاد فایل موقت برای این قسمت
                 temp_part_path = f"{file_path}_part{part_num + 1}"
                 with open(temp_part_path, 'wb') as part_file:
                     part_file.write(part_data)
                 
                 temp_parts.append(temp_part_path)
                 
+                # آپلود این قسمت
                 part_caption = f"{caption} - قسمت {part_num + 1}/{total_parts}"
                 
                 await app.send_document(
@@ -658,13 +695,14 @@ async def upload_file_in_parts(file_path: str, chat_id: int, caption: str, reply
                 
                 logger.info(f"Uploaded part {part_num + 1}/{total_parts}")
                 
+                # حذف فایل موقت این قسمت
                 try:
                     os.remove(temp_part_path)
                     temp_parts.remove(temp_part_path)
                 except:
                     pass
                 
-                await asyncio.sleep(1)
+                await asyncio.sleep(1)  # تاخیر بین آپلود قسمتها
         
         logger.info(f"All {total_parts} parts uploaded successfully")
         
@@ -672,6 +710,7 @@ async def upload_file_in_parts(file_path: str, chat_id: int, caption: str, reply
         logger.error(f"Error in chunked upload: {e}")
         raise
     finally:
+        # پاکسازی فایل‌های موقت در صورت وجود
         for temp_part in temp_parts:
             try:
                 if os.path.exists(temp_part):
@@ -679,7 +718,70 @@ async def upload_file_in_parts(file_path: str, chat_id: int, caption: str, reply
             except:
                 pass
 
+async def upload_zip_part(zip_path: str, part_number: int, total_parts: int, 
+                         chat_id: int, message_id: int, password: str, processing_msg: Message):
+    try:
+        if not os.path.exists(zip_path) or os.path.getsize(zip_path) == 0:
+            logger.error(f"Zip file not found or empty: {zip_path}")
+            return False
+            
+        part_size = os.path.getsize(zip_path)
+        
+        progress_tracker.reset(processing_msg, "آپلود", f"پارت {part_number + 1}", part_number + 1, total_parts)
+        
+        caption = (
+            f"📦 پارت {part_number + 1}/{total_parts}\n"
+            f"🔑 رمز: `{password}`\n"
+            f"💾 حجم: {progress_tracker.format_size(part_size)}"
+        )
+        
+        success = await upload_large_file_chunked(
+            file_path=zip_path,
+            chat_id=chat_id,
+            caption=caption,
+            reply_to_message_id=message_id,
+            progress_callback=progress_tracker.update_upload_progress,
+            progress_args=()
+        )
+        
+        if success:
+            logger.info(f"Part {part_number + 1}/{total_parts} uploaded successfully")
+            await asyncio.sleep(random.uniform(2.0, 5.0))
+            return True
+        else:
+            logger.error(f"Failed to upload part {part_number + 1}/{total_parts}")
+            return False
+            
+    except FloodWait as e:
+        wait_time = e.value + random.uniform(5, 15)
+        logger.warning(f"Upload FloodWait in main function: {wait_time} seconds")
+        
+        schedule_task(
+            upload_zip_part, 
+            wait_time, 
+            zip_path, part_number, total_parts, 
+            chat_id, message_id, password, processing_msg
+        )
+        
+        try:
+            await processing_msg.edit_text(
+                f"⏳ **آپلود متوقف شد**\n\n"
+                f"📦 پارت: {part_number + 1}/{total_parts}\n"
+                f"🕒 ادامه بعد از: {wait_time:.0f} ثانیه\n"
+                f"✅ به طور خودکار ادامه خواهد یافت",
+                parse_mode=enums.ParseMode.MARKDOWN
+            )
+        except:
+            pass
+            
+        return False
+        
+    except Exception as e:
+        logger.error(f"Error uploading part {part_number}: {e}")
+        return False
+
 async def cleanup_files(file_paths: List[str]):
+    """پاکسازی فایل‌های موقت"""
     for file_path in file_paths:
         try:
             if os.path.exists(file_path):
@@ -691,8 +793,9 @@ async def cleanup_files(file_paths: List[str]):
         except Exception as e:
             logger.error(f"Error cleaning up file {file_path}: {e}")
 
-# ===== هندلرهای مدیریت اندازه پارت =====
+# ===== هندلرهای جدید برای مدیریت اندازه پارت =====
 async def set_part_size(client, message: Message):
+    """مدیریت دستور /size برای تنظیم اندازه پارت"""
     if not is_user_allowed(message.from_user.id):
         return
     
@@ -704,7 +807,7 @@ async def set_part_size(client, message: Message):
             "📏 **تنظیم اندازه پارت**\n\n"
             "📝 استفاده: `/size <عدد>`\n"
             "💡 مثال: `/size 200` برای پارت‌های 200 مگابایتی\n\n"
-            f"⚙️ اندازه فعلی: `{get_user_part_size(user_id) // (1024*1024)} MB`\n"
+            f"⚙️ اندازه فعلی: `{Config.PART_SIZE // (1024*1024)} MB`\n"
             f"🔢 محدوده مجاز: 50 تا 2000 مگابایت",
             reply_to_message_id=message.id,
             parse_mode=enums.ParseMode.MARKDOWN
@@ -725,6 +828,7 @@ async def set_part_size(client, message: Message):
             )
             return
         
+        # ذخیره اندازه پارت برای کاربر
         user_states[f"{user_id}_part_size"] = size_mb * 1024 * 1024
         
         await safe_send_message(
@@ -747,9 +851,10 @@ async def set_part_size(client, message: Message):
         )
 
 def get_user_part_size(user_id: int) -> int:
-    return user_states.get(f"{user_id}_part_size", Config.DEFAULT_PART_SIZE)
+    """دریافت اندازه پارت برای کاربر خاص"""
+    return user_states.get(f"{user_id}_part_size", Config.PART_SIZE)
 
-# ===== هندلرهای اصلی =====
+# ===== هندلرها =====
 async def start(client, message: Message):
     if not is_user_allowed(message.from_user.id):
         return
@@ -770,7 +875,7 @@ async def start(client, message: Message):
         f"⚙️ **محدودیت‌ها:**\n"
         f"• حداکثر حجم هر فایل: {progress_tracker.format_size(Config.MAX_FILE_SIZE)}\n"
         f"• حداکثر حجم کل: {progress_tracker.format_size(Config.MAX_TOTAL_SIZE)}\n"
-        f"• اندازه پیش‌فرض پارت: {Config.DEFAULT_PART_SIZE // (1024*1024)} MB\n\n"
+        f"• اندازه پیش‌فرض پارت: {Config.PART_SIZE // (1024*1024)} MB\n\n"
         "🛠 برای لغو عملیات از /cancel استفاده کنید"
     )
     
@@ -928,6 +1033,7 @@ async def start_zip_now(client, message: Message):
         parse_mode=enums.ParseMode.MARKDOWN
     )
     
+    # اضافه کردن به صف پردازش
     add_to_queue(process_zip_files, user_id, zip_name, message.chat.id, message.id)
 
 async def cancel_zip(client, message: Message):
@@ -1120,7 +1226,6 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
     try:
         processing_msg = await app.send_message(chat_id, "⏳ **در حال آماده‌سازی...**\n\n🌀 لطفاً منتظر بمانید", parse_mode=enums.ParseMode.MARKDOWN)
         zip_password = user_states.get(f"{user_id}_password")
-        part_size = get_user_part_size(user_id)
         
         zip_progress_task = asyncio.create_task(progress_tracker.update_zip_progress())
         
@@ -1178,6 +1283,7 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
         
         await processing_msg.edit_text("📦 **در حال فشرده‌سازی همه فایل‌ها...**\n\n⏳ لطفاً منتظر بمانید", parse_mode=enums.ParseMode.MARKDOWN)
         
+        # ایجاد یک فایل ZIP واحد برای همه فایل‌ها
         final_zip_name = f"{zip_name}.zip"
         zip_path = os.path.join(tempfile.gettempdir(), f"zip_bot_{user_id}_{final_zip_name}")
         
@@ -1197,15 +1303,18 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
             await processing_msg.edit_text("❌ **خطا در ایجاد فایل زیپ**\n\nلطفاً دوباره تلاش کنید")
             return
         
+        # قبل از آپلود، مطمئن شویم فایل زیپ وجود دارد و خالی نیست
         if not os.path.exists(zip_path) or os.path.getsize(zip_path) == 0:
             logger.error(f"Zip file is missing or empty: {zip_path}")
             await processing_msg.edit_text("❌ **فایل زیپ ایجاد شده خالی است**\n\nلطفاً دوباره تلاش کنید")
             return
         
+        # بررسی نیاز به تقسیم فایل زیپ
         zip_size = os.path.getsize(zip_path)
-        part_size_mb = part_size // (1024 * 1024)
+        part_size = get_user_part_size(user_id)
         
         if zip_size <= part_size:
+            # آپلود مستقیم فایل زیپ (بدون تقسیم)
             await processing_msg.edit_text(
                 f"📤 **در حال آپلود فایل زیپ...**\n\n"
                 f"📝 نام: `{final_zip_name}`\n"
@@ -1227,10 +1336,10 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
                 ),
                 reply_to_message_id=message_id,
                 progress_callback=progress_tracker.update_upload_progress,
-                progress_args=(),
-                part_size=part_size
+                progress_args=()
             )
             
+            # حذف فایل زیپ فقط بعد از آپلود موفق
             if upload_success:
                 try:
                     if os.path.exists(zip_path):
@@ -1240,7 +1349,9 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
                     logger.error(f"Error cleaning up zip file {zip_path}: {e}")
             
         else:
+            # تقسیم فایل زیپ به پارت‌ها
             total_parts = (zip_size + part_size - 1) // part_size
+            part_size_mb = part_size // (1024 * 1024)
             
             await processing_msg.edit_text(
                 f"📦 **فایل زیپ بزرگ است، تقسیم به {total_parts} پارت...**\n\n"
@@ -1252,6 +1363,7 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
                 parse_mode=enums.ParseMode.MARKDOWN
             )
             
+            # تقسیم فایل زیپ به پارت‌ها
             zip_parts = []
             try:
                 with open(zip_path, 'rb') as f:
@@ -1267,6 +1379,7 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
                         zip_parts.append(part_path)
                         logger.info(f"Created part {part_num + 1}/{total_parts}: {progress_tracker.format_size(len(part_data))}")
                 
+                # آپلود هر پارت
                 for part_num, part_path in enumerate(zip_parts):
                     progress_tracker.reset(processing_msg, "آپلود", f"پارت {part_num + 1}", part_num + 1, total_parts)
                     
@@ -1282,8 +1395,7 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
                         caption=part_caption,
                         reply_to_message_id=message_id,
                         progress_callback=progress_tracker.update_upload_progress,
-                        progress_args=(),
-                        part_size=part_size
+                        progress_args=()
                     )
                     
                     if part_success:
@@ -1301,6 +1413,7 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
                 logger.error(f"Error splitting and uploading zip: {e}")
                 upload_success = False
                 
+                # پاکسازی پارت‌های باقیمانده
                 for part_path in zip_parts:
                     try:
                         if os.path.exists(part_path):
@@ -1308,6 +1421,7 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
                     except:
                         pass
         
+        # حذف فایل‌های دانلود شده فقط بعد از آپلود موفق
         if upload_success:
             await cleanup_files(temp_downloaded_files)
         else:
@@ -1319,7 +1433,7 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
                 f"📦 فایل زیپ ایجاد شده: `{final_zip_name}`\n"
                 f"🔑 رمز: `{zip_password or 'بدون رمز'}`\n"
                 f"📊 تعداد فایل‌ها: `{len(file_info_list)}`\n"
-                f"💾 حجم نهایی: `{progress_tracker.format_size(zip_size)}`\n\n"
+                f"💾 حجم نازی: `{progress_tracker.format_size(zip_size)}`\n\n"
                 f"📌 فایل‌ها به طور خودکار حذف شدند"
             )
         else:
@@ -1361,6 +1475,7 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
         if 'zip_progress_task' in locals():
             zip_progress_task.cancel()
         
+        # فقط در صورت موفقیت کامل فایل‌ها را حذف کن
         if user_id in user_files:
             user_files[user_id] = []
         user_states.pop(user_id, None)
@@ -1384,7 +1499,7 @@ async def run_bot():
     )
     
     app.on_message(filters.command("start"))(start)
-    app.on_message(filters.command("size"))(set_part_size)
+    app.on_message(filters.command("size"))(set_part_size)  # اضافه کردن هندلر جدید
     app.on_message(filters.document | filters.video | filters.audio)(handle_file)
     app.on_message(filters.command("zip"))(start_zip)
     app.on_message(filters.command("zipnow"))(start_zip_now)
@@ -1410,8 +1525,59 @@ async def run_bot():
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
+    web_app = Flask(__name__)
+    
+    @web_app.route('/')
+    def home():
+        return "🤖 Advanced Zip/Upload Bot is Running", 200
+    
+    @web_app.route('/health')
+    def health_check():
+        return {
+            "status": "healthy",
+            "queue_size": len(task_queue),
+            "scheduled_tasks": len(scheduled_tasks),
+            "users_with_files": len(user_files),
+            "timestamp": time.time()
+        }, 200
+    
+    @web_app.route('/stats')
+    def stats():
+        total_files = sum(len(files) for files in user_files.values())
+        total_size = sum(f["file_size"] for files in user_files.values() for f in files)
+        return {
+            "total_users": len(user_files),
+            "total_files": total_files,
+            "total_size": total_size,
+            "formatted_size": progress_tracker.format_size(total_size)
+        }, 200
+    
+    def start_bot():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(run_bot())
+        except Exception as e:
+            logger.error(f"Bot error: {e}")
+        finally:
+            loop.close()
+            zip_executor.shutdown(wait=True)
+    
+    bot_thread = threading.Thread(target=start_bot, daemon=True)
+    bot_thread.start()
+    
+    port = int(os.environ.get("PORT", 10000))
+    logger.info(f"🌐 Starting Flask web server on port {port}...")
+    
+    def run_web_app():
+        web_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+    
+    web_thread = threading.Thread(target=run_web_app, daemon=True)
+    web_thread.start()
+    
     try:
-        asyncio.run(run_bot())
+        bot_thread.join()
+        web_thread.join()
     except KeyboardInterrupt:
         logger.info("👋 Bot stopped by user")
         save_user_data()
