@@ -31,7 +31,7 @@ class Config:
     ALLOWED_USER_IDS = [417536686]
     MAX_FILE_SIZE = 2147483648  # 2GB
     MAX_TOTAL_SIZE = 4294967296  # 4GB
-    PART_SIZE = 400 * 1024 * 1024  # 400MB
+    PART_SIZE = 700 * 1024 * 1024  # 700MB - افزایش به 700 مگابایت
     CHUNK_SIZE = 512 * 1024  # 512KB
     MAX_CONCURRENT_DOWNLOADS = 1
     MAX_CONCURRENT_UPLOADS = 1
@@ -47,6 +47,7 @@ class Config:
     MEMORY_LIMIT = 450 * 1024 * 1024
     STREAMING_CHUNK_SIZE = 4 * 1024 * 1024
     UPLOAD_PART_SIZE = 100 * 1024 * 1024  # 100MB - اندازه هر قسمت برای آپلود
+    FREE_SPACE_THRESHOLD = 500 * 1024 * 1024  # 500MB حداقل فضای آزاد مورد نیاز
 
 # ===== لاگ پیشرفته =====
 logging.basicConfig(
@@ -237,6 +238,20 @@ def save_user_data():
             json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception as e:
         logger.error(f"Error saving user data: {e}")
+
+def get_free_disk_space():
+    """دریافت فضای آزاد دیسک"""
+    try:
+        stat = shutil.disk_usage(tempfile.gettempdir())
+        return stat.free
+    except Exception as e:
+        logger.error(f"Error getting disk space: {e}")
+        return 0
+
+def has_enough_free_space(required_space):
+    """بررسی وجود فضای کافی"""
+    free_space = get_free_disk_space()
+    return free_space >= (required_space + Config.FREE_SPACE_THRESHOLD)
 
 async def safe_send_message(chat_id, text, reply_to_message_id=None, reply_markup=None, parse_mode=None):
     max_retries = 2
@@ -747,6 +762,15 @@ async def upload_zip_part(zip_path: str, part_number: int, total_parts: int,
         
         if success:
             logger.info(f"Part {part_number + 1}/{total_parts} uploaded successfully")
+            
+            # حذف فایل زیپ بعد از آپلود موفق
+            try:
+                if os.path.exists(zip_path):
+                    os.remove(zip_path)
+                    logger.info(f"Deleted zip part after successful upload: {zip_path}")
+            except Exception as e:
+                logger.error(f"Error deleting zip file {zip_path}: {e}")
+            
             await asyncio.sleep(random.uniform(2.0, 5.0))
             return True
         else:
@@ -812,7 +836,7 @@ async def start(client, message: Message):
         "👋 **سلام! به ربات زیپ و آپلود پیشرفته خوش آمدید**\n\n"
         "✨ **قابلیت‌های ربات:**\n"
         "• 🔒 زیپ کردن فایل‌ها با رمزگذاری AES-256\n"
-        "• 📦 تقسیم به پارت‌های 400 مگابایتی\n"
+        "• 📦 تقسیم به پارت‌های 700 مگابایتی\n"
         "• ⚡ آپلود تکه تکه فایل‌های بزرگ\n"
         "• 🛡️ مدیریت محدودیت‌های تلگرام\n"
         "• 📊 نمایش پیشرفت حرفه‌ای\n\n"
@@ -1085,7 +1109,7 @@ async def handle_callback_query(client, callback_query):
             "4. تنظیمات: رمز کلی و نام فایل را وارد کنید\n"
             "5. دریافت: ربات فایل‌ها را زیپ و آپلود می‌کند\n\n"
             "⚙️ **ویژگی‌های پیشرفته:**\n"
-            "• تقسیم خودکار به پارت‌های 400 مگابایتی\n"
+            "• تقسیم خودکار به پارت‌های 700 مگابایتی\n"
             "• آپلود تکه تکه فایل‌های بزرگ\n"
             "• رمزگذاری AES-256\n"
             "• بازیابی از خطا\n\n"
@@ -1189,7 +1213,7 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
             await processing_msg.edit_text("❌ **هیچ فایلی با موفقیت دانلود نشد**\n\nلطفاً دوباره تلاش کنید")
             return
         
-        await processing_msg.edit_text("📦 **در حال ایجاد پارت‌های 400 مگابایتی...**\n\n⏳ لطفاً منتظر بمانید", parse_mode=enums.ParseMode.MARKDOWN)
+        await processing_msg.edit_text("📦 **در حال ایجاد پارت‌های 700 مگابایتی...**\n\n⏳ لطفاً منتظر بمانید", parse_mode=enums.ParseMode.MARKDOWN)
         
         file_info_list.sort(key=lambda x: x['size'], reverse=True)
         
@@ -1200,7 +1224,7 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
         for file_info in file_info_list:
             file_size = file_info['size']
             
-            if file_size > 350 * 1024 * 1024:
+            if file_size > 650 * 1024 * 1024:  # فایل‌های بزرگتر از 650MB در پارت جداگانه
                 if current_part:
                     parts.append(current_part)
                     current_part = []
@@ -1276,6 +1300,10 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
             if upload_success:
                 successful_parts += 1
                 logger.info(f"Part {part_number} processed successfully")
+                
+                # حذف فایل زیپ از لیست پاکسازی چون قبلاً حذف شده
+                if zip_path in zip_files_to_cleanup:
+                    zip_files_to_cleanup.remove(zip_path)
             else:
                 logger.error(f"Failed to upload part {part_number}")
             
@@ -1330,15 +1358,15 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
         if 'zip_progress_task' in locals():
             zip_progress_task.cancel()
         
-        # پاکسازی فقط بعد از اتمام کامل همه آپلودها
+        # پاکسازی فایل‌های دانلود شده
         await cleanup_files(temp_downloaded_files)
         
-        # پاکسازی فایل‌های زیپ فقط اگر همه آپلودها کامل شده باشند
+        # پاکسازی فایل‌های زیپ باقیمانده (آنهایی که آپلود نشدند)
         for zip_file in zip_files_to_cleanup:
             try:
                 if os.path.exists(zip_file):
                     os.remove(zip_file)
-                    logger.info(f"Cleaned up zip file: {zip_file}")
+                    logger.info(f"Cleaned up remaining zip file: {zip_file}")
             except Exception as e:
                 logger.error(f"Error cleaning up zip file {zip_file}: {e}")
         
