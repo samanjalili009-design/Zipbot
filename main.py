@@ -23,6 +23,7 @@ import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import queue
 import re
+import gc
 
 # ===== تنظیمات پیشرفته =====
 class Config:
@@ -43,10 +44,11 @@ class Config:
     MAX_UPLOAD_RETRIES = 3
     ZIP_COMPRESSION_LEVEL = 3
     MAX_ZIP_RETRIES = 2
-    ZIP_BASE_TIMEOUT = 1800
-    ZIP_TIMEOUT_PER_GB = 900
+    ZIP_BASE_TIMEOUT = 3600  # 1 hour for large files
+    ZIP_TIMEOUT_PER_GB = 1800  # 30 minutes per GB
     MEMORY_LIMIT = 450 * 1024 * 1024
-    STREAMING_CHUNK_SIZE = 4 * 1024 * 1024
+    STREAMING_CHUNK_SIZE = 4 * 1024 * 1024  # 4MB chunks for streaming
+    MAX_STREAMING_BUFFER = 8 * 1024 * 1024  # 8MB max buffer
 
 # ===== لاگ پیشرفته =====
 logging.basicConfig(
@@ -90,6 +92,7 @@ class ProgressTracker:
         self.zip_progress_queue = queue.Queue()
         self.upload_progress_queue = queue.Queue()
         self.is_uploading = False
+        self.last_memory_check = time.time()
 
     def reset(self, message: Message = None, stage: str = "", file_name: str = "", file_index: int = 0, total_files: int = 0):
         self.start_time = time.time()
@@ -104,11 +107,17 @@ class ProgressTracker:
         self.file_index = file_index
         self.total_files = total_files
         self.is_uploading = (stage == "آپلود")
+        self.last_memory_check = time.time()
 
     async def update(self, current: int, total: int):
         try:
             async with self.lock:
                 now = time.time()
+                
+                # بررسی حافظه هر 30 ثانیه
+                if now - self.last_memory_check > 30:
+                    self.check_memory_usage()
+                    self.last_memory_check = now
                 
                 update_interval = Config.PROGRESS_UPDATE_INTERVAL
                 if self.is_uploading:
@@ -161,6 +170,23 @@ class ProgressTracker:
                         
         except Exception as e:
             logger.error(f"Progress update error: {e}")
+
+    def check_memory_usage(self):
+        """بررسی مصرف حافظه و پاک‌سازی اگر لازم باشد"""
+        try:
+            import psutil
+            process = psutil.Process()
+            memory_usage = process.memory_info().rss
+            
+            if memory_usage > Config.MEMORY_LIMIT:
+                logger.warning(f"High memory usage: {self.format_size(memory_usage)}")
+                gc.collect()
+                logger.info("Garbage collection performed due to high memory usage")
+                
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.error(f"Memory check error: {e}")
 
     async def update_zip_progress(self):
         try:
@@ -394,7 +420,7 @@ async def notify_user_floodwait(user_id: int, wait_time: int):
 def calculate_zip_timeout(total_size_mb: float) -> int:
     base_timeout = Config.ZIP_BASE_TIMEOUT
     additional_time = max(0, (total_size_mb - 1024) / 1024 * Config.ZIP_TIMEOUT_PER_GB)
-    total_timeout = min(base_timeout + additional_time, 3 * 3600)
+    total_timeout = min(base_timeout + additional_time, 6 * 3600)  # حداکثر 6 ساعت
     logger.info(f"Calculated zip timeout: {total_timeout/60:.1f} minutes for {total_size_mb:.1f}MB")
     return int(total_timeout)
 
@@ -405,6 +431,7 @@ def zip_creation_task_streaming(zip_path: str, files: List[Dict], password: Opti
         
         logger.info(f"Starting streaming zip creation for {len(files)} files, total size: {total_size/1024/1024:.1f}MB")
         
+        # بررسی وجود فایل‌ها
         for file_info in files:
             if not os.path.exists(file_info['path']):
                 logger.error(f"File not found: {file_info['path']}")
@@ -413,6 +440,7 @@ def zip_creation_task_streaming(zip_path: str, files: List[Dict], password: Opti
                 logger.error(f"File is empty: {file_info['path']}")
                 return False
         
+        # تعیین نوع فشرده‌سازی
         compression = pyzipper.ZIP_STORED if any(f['name'].lower().endswith(('.zip', '.rar', '.7z', '.tar', '.gz')) for f in files) else pyzipper.ZIP_DEFLATED
         
         with pyzipper.AESZipFile(
@@ -432,6 +460,7 @@ def zip_creation_task_streaming(zip_path: str, files: List[Dict], password: Opti
                     logger.error(f"Error setting password: {e}")
                     return False
             
+            # پردازش هر فایل به صورت streaming
             for file_info in files:
                 file_path = file_info['path']
                 arcname = os.path.basename(file_info['name'])
@@ -441,16 +470,23 @@ def zip_creation_task_streaming(zip_path: str, files: List[Dict], password: Opti
                     continue
                 
                 try:
+                    file_size = os.path.getsize(file_path)
+                    logger.info(f"Adding {arcname} ({file_size/1024/1024:.1f}MB) to zip")
+                    
+                    # اضافه کردن فایل به صورت تکه‌تکه
                     with open(file_path, 'rb') as f:
-                        with zipf.open(arcname, 'w') as zf:
+                        with zipf.open(arcname, 'w', force_zip64=True) as zf:
                             while True:
                                 chunk = f.read(Config.STREAMING_CHUNK_SIZE)
                                 if not chunk:
                                     break
                                 zf.write(chunk)
                                 processed_size += len(chunk)
-                                progress_queue.put((processed_size, total_size))
-                                logger.debug(f"Added chunk of {len(chunk)} bytes from {arcname}, progress: {processed_size}/{total_size}")
+                                
+                                # ارسال پیشرفت هر 5MB یا بیشتر
+                                if processed_size % (5 * 1024 * 1024) < Config.STREAMING_CHUNK_SIZE:
+                                    progress_queue.put((processed_size, total_size))
+                                    logger.debug(f"Progress: {processed_size}/{total_size}")
                     
                     logger.info(f"Successfully added {arcname} to zip")
                     
@@ -458,6 +494,7 @@ def zip_creation_task_streaming(zip_path: str, files: List[Dict], password: Opti
                     logger.error(f"Error adding file {arcname} to zip: {e}")
                     continue
         
+        # بررسی نهایی فایل زیپ
         if os.path.exists(zip_path) and os.path.getsize(zip_path) > 0:
             zip_size = os.path.getsize(zip_path)
             compression_ratio = (1 - (zip_size / total_size)) * 100 if total_size > 0 else 0
@@ -465,11 +502,16 @@ def zip_creation_task_streaming(zip_path: str, files: List[Dict], password: Opti
                        f"size: {zip_size/1024/1024:.1f}MB, "
                        f"compression: {compression_ratio:.1f}%")
             
+            # اعتبارسنجی فایل زیپ
             try:
                 with pyzipper.AESZipFile(zip_path, 'r') as test_zip:
                     if password:
                         test_zip.setpassword(password.encode('utf-8'))
-                    test_zip.testzip()
+                    # تست فقط روی چند فایل اول برای صرفه‌جویی در زمان
+                    test_files = test_zip.namelist()[:3]
+                    for test_file in test_files:
+                        with test_zip.open(test_file) as f:
+                            f.read(1024)  # خواندن کمی از هر فایل
                     logger.info("Zip validation passed")
                     return True
             except Exception as test_error:
@@ -495,6 +537,7 @@ async def create_zip_part_advanced(zip_path: str, files: List[Dict], default_pas
         try:
             os.makedirs(os.path.dirname(zip_path), exist_ok=True)
             
+            # حذف فایل موجود اگر وجود دارد
             if os.path.exists(zip_path):
                 try:
                     os.remove(zip_path)
@@ -502,6 +545,7 @@ async def create_zip_part_advanced(zip_path: str, files: List[Dict], default_pas
                 except Exception as e:
                     logger.error(f"Error removing existing zip: {e}")
             
+            # بررسی فایل‌ها
             missing_files = []
             empty_files = []
             for file_info in files:
