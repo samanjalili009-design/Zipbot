@@ -41,7 +41,7 @@ class Config:
     DATA_FILE = "user_data.json"
     UPLOAD_CHUNK_SIZE = 2 * 1024 * 1024  # 2MB برای آپلود
     MAX_UPLOAD_RETRIES = 3
-    ZIP_COMPRESSION_LEVEL = 3
+    ZIP_COMPRESSION_LEVEL = 9  # حداکثر فشرده سازی (0-9)
     MAX_ZIP_RETRIES = 2
     ZIP_BASE_TIMEOUT = 1800
     ZIP_TIMEOUT_PER_GB = 900
@@ -265,7 +265,7 @@ async def safe_send_message(chat_id, text, reply_to_message_id=None, reply_marku
         logger.error(f"Failed to send message even without parse_mode: {e}")
         return None
 
-async def safe_download_media(message, file_path, file_name="", file_index=0, total_files=0, processing_msg=None):
+async def safe_download_media(message, file_path, file_name="", file_index=0, total_files=0, processing_msg=None, expected_size=0):
     max_retries = 2
     for attempt in range(max_retries):
         try:
@@ -282,10 +282,30 @@ async def safe_download_media(message, file_path, file_name="", file_index=0, to
                     progress=progress_tracker.update
                 )
                 
+                # بررسی صحت دانلود
                 if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+                    actual_size = os.path.getsize(file_path)
+                    if expected_size > 0 and actual_size != expected_size:
+                        logger.warning(f"File size mismatch for {file_name}: expected {expected_size}, got {actual_size}")
+                        
+                        if attempt < max_retries - 1:
+                            logger.info(f"Retrying download for {file_name} (attempt {attempt + 2})")
+                            try:
+                                os.remove(file_path)
+                            except:
+                                pass
+                            continue
+                        else:
+                            logger.error(f"Failed to download {file_name} correctly after {max_retries} attempts")
+                            return False
+                    
+                    logger.info(f"Successfully downloaded {file_name} (size: {actual_size})")
                     return True
                 else:
                     logger.warning(f"Downloaded file is empty or missing (attempt {attempt + 1})")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(Config.RETRY_DELAY)
+                        continue
                     
         except FloodWait as e:
             wait_time = e.value + random.uniform(3, 7)
@@ -413,7 +433,8 @@ def zip_creation_task_streaming(zip_path: str, files: List[Dict], password: Opti
                 logger.error(f"File is empty: {file_info['path']}")
                 return False
         
-        compression = pyzipper.ZIP_STORED if any(f['name'].lower().endswith(('.zip', '.rar', '.7z', '.tar', '.gz')) for f in files) else pyzipper.ZIP_DEFLATED
+        # تعیین نوع فشرده‌سازی بر اساس نوع فایل
+        compression = pyzipper.ZIP_DEFLATED  # همیشه از فشرده‌سازی استفاده کن
         
         with pyzipper.AESZipFile(
             zip_path, 
@@ -1164,7 +1185,8 @@ async def process_zip_files(user_id, zip_name, chat_id, message_id):
                     file_name,
                     i,
                     total_files,
-                    processing_msg
+                    processing_msg,
+                    finfo["file_size"]  # ارسال اندازه مورد انتظار برای بررسی
                 )
                 
                 if success and os.path.exists(file_path) and os.path.getsize(file_path) > 0:
